@@ -1,0 +1,43 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// Quirks are discussed in (/doc/note/quirks.md).
+//
+// The base38 encoding of "vp8." is 0x1B_5EFE. Left shifting by 10 gives
+// 0x6D7B_F800.
+pri const QUIRKS_BASE : base.u32 = 0x6D7B_F800
+
+// --------
+
+// When this quirk is enabled, the workbuf starts with (width × height) alpha
+// samples, decoded out-of-band (from the VP8 decoder's perspective, they are
+// typically decoded in-band from the surrounding WebP decoder's perspective).
+pub const QUIRK_HAS_ALPHA_SIDE_CHANNEL : base.u32 = 0x6D7B_F800 | 0x00
+
+// Gives the image width and height out-of-band, in the u64 quirk value. The
+// low 32 bits are the width and the high 32 bits are the height. Both
+// dimensions should range within 0x0001 ..= 0x3FFF.
+//
+// A simple WebP file could contain one chunk, a VP8 chunk, that gives the
+// image width and height. A complex WebP file could contain three chunks:
+// VP8X, ALPH and VP8. The image dimensions are given in the VP8X chunk and are
+// then repeated in the VP8 chunk.
+//
+// After a webp.decoder decode_image_config call, the caller might next want to
+// query the workbuf length, to know how much memory to dynamically allocate,
+// especially before attempting to decode the ALPH chunk. The outer
+// webp.decoder workbuf_len method can delegate to the inner vp8.decoder
+// workbuf_len method, but the latter needs to know the image dimensions.
+//
+// This quirk mechanism lets the outer webp decoder tell the inner vp8 decoder
+// those dimensions, after parsing the VP8X chunk but before ALPH or VP8.
+pub const QUIRK_WIDTH_AND_HEIGHT : base.u32 = 0x6D7B_F800 | 0x01

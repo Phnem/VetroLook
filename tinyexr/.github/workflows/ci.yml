@@ -1,0 +1,253 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release", "master"]
+  pull_request:
+    branches: ["release", "master"]
+
+jobs:
+  tinyexr-v3-c:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-gcc-v3-c
+            runs_on: ubuntu-latest
+            cc: gcc
+            cxx: g++
+            asan_options: detect_leaks=1
+          - name: linux-x64-clang-v3-c
+            runs_on: ubuntu-latest
+            cc: clang
+            cxx: clang++
+            asan_options: detect_leaks=1
+          - name: macos-arm64-clang-v3-c
+            runs_on: macos-latest
+            cc: clang
+            cxx: clang++
+            asan_options: detect_leaks=0
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      ASAN_OPTIONS: ${{ matrix.asan_options }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Strict pure-C11 syntax gate
+        run: make c11-gate
+
+      - name: Build TinyEXR v3 C library
+        run: make lib
+
+      - name: Run TinyEXR v3 C unit tests
+        run: make test-c
+
+  tinyexr-v3-c-windows:
+    name: windows-x64-mingw-v3-c
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git make diffutils python mingw-w64-ucrt-x86_64-gcc
+
+      - name: Strict pure-C11 syntax gate
+        shell: msys2 {0}
+        run: make SAN= c11-gate
+
+      - name: Build TinyEXR v3 C library
+        shell: msys2 {0}
+        run: make SAN= lib
+
+      - name: Run TinyEXR v3 C unit tests
+        shell: msys2 {0}
+        run: make SAN= test-c
+
+  tools-c:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-gcc-tools-c
+            runs_on: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - name: linux-x64-clang-tools-c
+            runs_on: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: macos-arm64-clang-tools-c
+            runs_on: macos-latest
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run TIR, texcomp, texpipe, and envmap gates
+        run: make tools-test
+
+      - name: Build TIR, texcomp, texpipe, and envmap CLIs
+        run: make resize-cli texcomp texpipe envmap
+
+  tools-c-windows:
+    name: windows-x64-mingw-tools-c
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git make mingw-w64-ucrt-x86_64-gcc
+
+      - name: Run TIR, texcomp, texpipe, and envmap gates
+        shell: msys2 {0}
+        run: make SAN= tools-test
+
+      - name: Build TIR, texcomp, texpipe, and envmap CLIs
+        shell: msys2 {0}
+        run: make SAN= resize-cli texcomp texpipe envmap
+
+  texcomp-cxx-gates:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-texcomp-cxx-gates
+            runs_on: ubuntu-latest
+          - name: macos-arm64-texcomp-cxx-gates
+            runs_on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build texcomp with vendored astcenc backend
+        run: make texcomp-arm
+
+      - name: Run texcomp ASTC HDR gate
+        run: make texcomp-astc-hdr-gate
+
+      - name: Run texcomp astcenc cross-check gate
+        run: make texcomp-astc-arm-gate
+
+      - name: Run texcomp Basis Universal validation gate
+        run: make texcomp-basis-gate
+
+  texcomp-cxx-gates-windows:
+    name: windows-x64-mingw-texcomp-cxx-gates
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git make mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build texcomp with vendored astcenc backend
+        shell: msys2 {0}
+        run: make texcomp-arm
+
+      - name: Run texcomp ASTC HDR gate
+        shell: msys2 {0}
+        run: make texcomp-astc-hdr-gate
+
+      - name: Run texcomp astcenc cross-check gate
+        shell: msys2 {0}
+        run: make texcomp-astc-arm-gate
+
+      - name: Run texcomp Basis Universal validation gate
+        shell: msys2 {0}
+        run: make texcomp-basis-gate
+
+  lsan-fuzz-corpus:
+    name: linux-x64-lsan-fuzz-corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Replay regression corpus under ASan/UBSan/LSan
+        run: make fuzz-corpus
+
+  tinyexr-v3-tsan:
+    name: linux-x64-tsan-v3-c
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run threaded tests under ThreadSanitizer
+        run: make test-c-tsan
+
+  freestanding:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-freestanding-gate
+            runs_on: ubuntu-latest
+          - name: linux-arm64-freestanding-gate
+            runs_on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Freestanding core gate (no libc, custom allocator)
+        run: make freestanding-gate
+
+      - name: Freestanding gate with opt-in zstd decode
+        run: make freestanding-zstd-gate

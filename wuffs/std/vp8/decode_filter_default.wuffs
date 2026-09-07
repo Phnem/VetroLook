@@ -1,0 +1,554 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// RFC 6386 Section 15.2 Simple Filter.
+pri func decoder.filter_simple!(workbuf: slice base.u8, mby: base.u32[..= 0x3FF]) {
+    var mbx          : base.u32
+    var filter_index : base.u32
+    var filter_bits  : base.u32
+    var wy           : base.u64
+
+    mbx = 0
+    while mbx < this.mbw {
+        assert mbx < 0x400 via "a < b: a < c; c <= b"(c: this.mbw)
+
+        filter_index = this.mb_filters[args.mby & 1][mbx] as base.u32
+        filter_bits = this.loop_filters[filter_index & 7]
+        if filter_bits == 0 {
+            mbx += 1
+            continue
+        }
+        // "decode_one_macroblock's (not skip)" also triggers inner filters.
+        filter_bits |= (filter_index & 8) << 28
+
+        wy = ((((args.mby * this.workbuf_yuv_y_stride) + mbx) * 16) as base.u64) + 0
+
+        // Inter-filter horizontally, together with the adjacent macroblock.
+        if mbx > 0 {
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x0,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1)
+        }
+
+        // Intra-filter (inner) horizontally, within this macroblock.
+        if filter_bits >= 0x8000_0000 {
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x4,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1)
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x8,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1)
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + 0xC,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1)
+        }
+
+        // Inter-filter vertically, together with the adjacent macroblock.
+        if args.mby > 0 {
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride)
+        }
+
+        // Intra-filter (inner) vertically, within this macroblock.
+        if filter_bits >= 0x8000_0000 {
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0x4 * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride)
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0x8 * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride)
+            this.filter_2!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0xC * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride)
+        }
+
+        mbx += 1
+    }
+}
+
+// RFC 6386 Section 15.3 Normal Filter.
+pri func decoder.filter_normal!(workbuf: slice base.u8, mby: base.u32[..= 0x3FF]) {
+    var mbx          : base.u32
+    var filter_index : base.u32
+    var filter_bits  : base.u32
+    var wy           : base.u64
+    var wu           : base.u64
+    var wv           : base.u64
+
+    mbx = 0
+    while mbx < this.mbw {
+        assert mbx < 0x400 via "a < b: a < c; c <= b"(c: this.mbw)
+
+        filter_index = this.mb_filters[args.mby & 1][mbx] as base.u32
+        filter_bits = this.loop_filters[filter_index & 7]
+        if filter_bits == 0 {
+            mbx += 1
+            continue
+        }
+        // "decode_one_macroblock's (not skip)" also triggers inner filters.
+        filter_bits |= (filter_index & 8) << 28
+
+        wy = ((((args.mby * this.workbuf_yuv_y_stride) + mbx) * 16) as base.u64) + 0
+        wu = ((((args.mby * this.workbuf_yuv_uv_stride) + mbx) * 8) as base.u64) + this.workbuf_yuv_y_end
+        wv = ((((args.mby * this.workbuf_yuv_uv_stride) + mbx) * 8) as base.u64) + this.workbuf_yuv_u_end
+
+        // Inter-filter horizontally, together with the adjacent macroblock.
+        if mbx > 0 {
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x0,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1,
+                    n: 16,
+                    inner: false)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wu + 0x0,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: this.workbuf_yuv_uv_stride,
+                    j_step: 1,
+                    n: 8,
+                    inner: false)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wv + 0x0,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: this.workbuf_yuv_uv_stride,
+                    j_step: 1,
+                    n: 8,
+                    inner: false)
+        }
+
+        // Intra-filter (inner) horizontally, within this macroblock.
+        if filter_bits >= 0x8000_0000 {
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x4,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + 0x8,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + 0xC,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_y_stride,
+                    j_step: 1,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wu + 0x4,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_uv_stride,
+                    j_step: 1,
+                    n: 8,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wv + 0x4,
+                    filter_bits: filter_bits,
+                    i_step: this.workbuf_yuv_uv_stride,
+                    j_step: 1,
+                    n: 8,
+                    inner: true)
+        }
+
+        // Inter-filter vertically, together with the adjacent macroblock.
+        if args.mby > 0 {
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride,
+                    n: 16,
+                    inner: false)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wu,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_uv_stride,
+                    n: 8,
+                    inner: false)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wv,
+                    filter_bits: filter_bits ~mod+ 4,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_uv_stride,
+                    n: 8,
+                    inner: false)
+        }
+
+        // Intra-filter (inner) vertically, within this macroblock.
+        if filter_bits >= 0x8000_0000 {
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0x4 * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0x8 * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wy + ((0xC * this.workbuf_yuv_y_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_y_stride,
+                    n: 16,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wu + ((0x4 * this.workbuf_yuv_uv_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_uv_stride,
+                    n: 8,
+                    inner: true)
+            this.filter_246!(
+                    workbuf: args.workbuf,
+                    w: wv + ((0x4 * this.workbuf_yuv_uv_stride) as base.u64),
+                    filter_bits: filter_bits,
+                    i_step: 1,
+                    j_step: this.workbuf_yuv_uv_stride,
+                    n: 8,
+                    inner: true)
+        }
+
+        mbx += 1
+    }
+}
+
+pri func decoder.filter_2!(
+        workbuf: slice base.u8,
+        w: base.u64,
+        filter_bits: base.u32,
+        i_step: base.u32,
+        j_step: base.u32) {
+    var n : base.u32
+
+    var level : base.u32
+
+    var o  : base.u64
+    var p1 : base.u32
+    var p0 : base.u32
+    var q0 : base.u32
+    var q1 : base.u32
+
+    var d0 : base.u32
+    var d1 : base.u32
+
+    var a  : base.u32
+    var a1 : base.u32
+    var a2 : base.u32
+
+    level = (args.filter_bits >> 0x00) & 0xFF
+
+    n = 16
+    while n > 0 {
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 2)
+        if o < args.workbuf.length() {
+            p1 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+        if o < args.workbuf.length() {
+            p0 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+        if o < args.workbuf.length() {
+            q0 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 1)
+        if o < args.workbuf.length() {
+            q1 = args.workbuf[o] as base.u32
+        }
+
+        while.goto_increment_and_continue true,
+                inv n > 0,
+        {{
+
+        d0 = this.abs_diff(a: p0, b: q0)
+        d1 = this.abs_diff(a: p1, b: q1)
+        if ((d0 ~mod<< 1) ~mod+ (d1 >> 1)) > level {
+            break.goto_increment_and_continue
+        }
+
+        a = (3 ~mod* (q0 ~mod- p0)) ~mod+ this.clip_m128_p127(a: p1 ~mod- q1)
+        a1 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 4, n: 3))
+        a2 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 3, n: 3))
+
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+        if o < args.workbuf.length() {
+            args.workbuf[o] = this.clip_255_u8(a: p0 ~mod+ a2)
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+        if o < args.workbuf.length() {
+            args.workbuf[o] = this.clip_255_u8(a: q0 ~mod- a1)
+        }
+
+        break.goto_increment_and_continue
+        }}.goto_increment_and_continue
+
+        args.w ~mod+= args.i_step as base.u64
+        n -= 1
+    }
+}
+
+pri func decoder.filter_246!(
+        workbuf: slice base.u8,
+        w: base.u64,
+        filter_bits: base.u32,
+        i_step: base.u32,
+        j_step: base.u32,
+        n: base.u32,
+        inner: base.bool) {
+    var level  : base.u32
+    var ilevel : base.u32
+    var hlevel : base.u32
+
+    var o  : base.u64
+    var p3 : base.u32
+    var p2 : base.u32
+    var p1 : base.u32
+    var p0 : base.u32
+    var q0 : base.u32
+    var q1 : base.u32
+    var q2 : base.u32
+    var q3 : base.u32
+
+    var d0 : base.u32
+    var d1 : base.u32
+
+    var a  : base.u32
+    var a1 : base.u32
+    var a2 : base.u32
+    var a3 : base.u32
+
+    level = (args.filter_bits >> 0x00) & 0xFF
+    ilevel = (args.filter_bits >> 0x08) & 0xFF
+    hlevel = (args.filter_bits >> 0x10) & 0xFF
+
+    while args.n > 0 {
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 4)
+        if o < args.workbuf.length() {
+            p3 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 3)
+        if o < args.workbuf.length() {
+            p2 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 2)
+        if o < args.workbuf.length() {
+            p1 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+        if o < args.workbuf.length() {
+            p0 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+        if o < args.workbuf.length() {
+            q0 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 1)
+        if o < args.workbuf.length() {
+            q1 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 2)
+        if o < args.workbuf.length() {
+            q2 = args.workbuf[o] as base.u32
+        }
+        o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 3)
+        if o < args.workbuf.length() {
+            q3 = args.workbuf[o] as base.u32
+        }
+
+        while.goto_increment_and_continue true,
+                inv args.n > 0,
+        {{
+
+        d0 = this.abs_diff(a: p0, b: q0)
+        d1 = this.abs_diff(a: p1, b: q1)
+        if ((d0 ~mod<< 1) ~mod+ (d1 >> 1)) > level {
+            break.goto_increment_and_continue
+        }
+
+        d0 = this.abs_diff(a: p1, b: p0)
+        d1 = this.abs_diff(a: q0, b: q1)
+        if (d0 > ilevel) or (d1 > ilevel) or
+                (this.abs_diff(a: p3, b: p2) > ilevel) or
+                (this.abs_diff(a: p2, b: p1) > ilevel) or
+                (this.abs_diff(a: q1, b: q2) > ilevel) or
+                (this.abs_diff(a: q2, b: q3) > ilevel) {
+            break.goto_increment_and_continue
+        }
+
+        if (d0 > hlevel) or (d1 > hlevel) {
+            a = (3 ~mod* (q0 ~mod- p0)) ~mod+ this.clip_m128_p127(a: p1 ~mod- q1)
+            a1 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 4, n: 3))
+            a2 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 3, n: 3))
+
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p0 ~mod+ a2)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q0 ~mod- a1)
+            }
+
+        } else if args.inner {
+            a = 3 ~mod* (q0 ~mod- p0)
+            a1 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 4, n: 3))
+            a2 = this.clip_m16_p15(a: this.util.sign_extend_rshift_u32(a: a ~mod+ 3, n: 3))
+            a3 = this.util.sign_extend_rshift_u32(a: a1 ~mod+ 1, n: 1)
+
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 2)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p1 ~mod+ a3)
+            }
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p0 ~mod+ a2)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q0 ~mod- a1)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 1)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q1 ~mod- a3)
+            }
+
+        } else {
+            a = (3 ~mod* (q0 ~mod- p0)) ~mod+ this.clip_m128_p127(a: p1 ~mod- q1)
+            a = this.clip_m128_p127(a: a)
+            a1 = this.util.sign_extend_rshift_u32(a: (a ~mod* 0x1B) ~mod+ 63, n: 7)
+            a2 = this.util.sign_extend_rshift_u32(a: (a ~mod* 0x12) ~mod+ 63, n: 7)
+            a3 = this.util.sign_extend_rshift_u32(a: (a ~mod* 0x09) ~mod+ 63, n: 7)
+
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 3)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p2 ~mod+ a3)
+            }
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 2)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p1 ~mod+ a2)
+            }
+            o = args.w ~mod- ((args.j_step as base.u64) ~mod* 1)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: p0 ~mod+ a1)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 0)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q0 ~mod- a1)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 1)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q1 ~mod- a2)
+            }
+            o = args.w ~mod+ ((args.j_step as base.u64) ~mod* 2)
+            if o < args.workbuf.length() {
+                args.workbuf[o] = this.clip_255_u8(a: q2 ~mod- a3)
+            }
+        }
+
+        break.goto_increment_and_continue
+        }}.goto_increment_and_continue
+
+        args.w ~mod+= args.i_step as base.u64
+        args.n -= 1
+    }
+
+}
+
+pri func decoder.abs_diff(a: base.u32, b: base.u32) base.u32 {
+    var c : base.u32
+
+    c = args.a ~mod- args.b
+    if c < 0x8000_0000 {
+        return c
+    }
+    return 0 ~mod- c
+}
+
+pri func decoder.clip_m16_p15(a: base.u32) base.u32 {
+    if (args.a ~mod+ 0x10) <= 0x20 {
+        return args.a
+    } else if args.a < 0x8000_0000 {
+        return 0x0F
+    }
+    return 0xFFFF_FFF0
+}
+
+pri func decoder.clip_m128_p127(a: base.u32) base.u32 {
+    if (args.a ~mod+ 0x80) <= 0xFF {
+        return args.a
+    } else if args.a < 0x8000_0000 {
+        return 0x7F
+    }
+    return 0xFFFF_FF80
+}
+
+pri func decoder.clip_255_u8(a: base.u32) base.u8 {
+    if args.a <= 255 {
+        return args.a as base.u8
+    } else if args.a < 0x8000_0000 {
+        return 255
+    }
+    return 0
+}

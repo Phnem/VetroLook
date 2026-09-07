@@ -1,0 +1,695 @@
+// Copyright 2024 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+use "std/vp8"
+
+pub status "#bad ALPH+VP8L combination"
+pub status "#bad Huffman code (over-subscribed)"
+pub status "#bad Huffman code (under-subscribed)"
+pub status "#bad Huffman code"
+pub status "#bad VP8X chunk"
+pub status "#bad back-reference"
+pub status "#bad chunk order"
+pub status "#bad color cache"
+pub status "#bad header"
+pub status "#bad transform"
+pub status "#short chunk"
+pub status "#truncated input"
+pub status "#unsupported WebP file"
+pub status "#unsupported number of Huffman groups"
+
+pri status "#internal error: inconsistent Huffman code"
+pri status "#internal error: inconsistent dst buffer"
+pri status "#internal error: inconsistent n_bits"
+
+// TODO: reference vp8.DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE, although the
+// worst case for VP8L is bigger than for VP8.
+pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x4C00_0000
+
+pub struct decoder? implements base.image_decoder(
+        width  : base.u32[..= 0x4000],
+        height : base.u32[..= 0x4000],
+
+        // The call sequence state machine is discussed in
+        // (/doc/std/image-decoders-call-sequence.md).
+        call_sequence : base.u8,
+
+        code_length_code_lengths : array[19] base.u8[..= 7],
+
+        sub_chunk_has_padding : base.bool,
+
+        // 0x01 = VP8  lossy
+        // 0x02 = VP8L lossless
+        // 0x04 = VP8X and seen VP8X  chunks
+        // 0x08 = VP8X and seen VP8X, ICCP   chunks
+        // 0x10 = VP8X and seen VP8X, ICCP†, ANIM   chunks
+        // 0x20 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF   chunks
+        // 0x40 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH   chunks
+        // 0x81 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH†, VP8  chunks
+        // 0x82 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH†, VP8L chunks
+        //
+        // Chunks marked with a † are optional.
+        variant : base.u8,
+
+        // The "Rsv|I|L|E|X|A|R" bits from
+        // https://developers.google.com/speed/webp/docs/riff_container#extended_file_format
+        //
+        // We also re-purpose the otherwise-unused 0x01 bit to mean VP8X-ness,
+        // so that (vp8x_header_flags <> 0) is an easy check for VP8X versus
+        // not-VP8X. Similarly, ((vp8x_header_flags & 0x11) == 0x01) is an easy
+        // check for "VP8X without an ALPH chunk".
+        //
+        // See also libwebp's src/webp/mux_types.h:
+        //
+        // ANIMATION_FLAG = 0x00000002,
+        // XMP_FLAG       = 0x00000004,
+        // EXIF_FLAG      = 0x00000008,
+        // ALPHA_FLAG     = 0x00000010,
+        // ICCP_FLAG      = 0x00000020,
+        vp8x_header_flags : base.u8,
+
+        // The "Rsv| P | F | C" bits from
+        // https://developers.google.com/speed/webp/docs/riff_container#alpha
+        //
+        // We also re-purpose the otherwise-unused 0x02 bit to mean that we
+        // have seen the ALPH chunk.
+        vp8x_alph_flags : base.u8,
+
+        frame_config_io_position : base.u64,
+
+        riff_chunk_length : base.u32,
+        rcl_remaining     : base.u32,
+        sub_chunk_length  : base.u32,
+        sub_chunk_type    : base.u32,
+
+        bits   : base.u32,
+        n_bits : base.u32[..= 31],
+
+        seen_transform           : array[4] base.bool,
+        transform_type           : array[4] base.u8[..= 3],
+        transform_tile_size_log2 : array[4] base.u8[..= 9],
+        n_transforms             : base.u32[..= 4],
+
+        color_cache_bits         : base.u32[..= 11],
+        overall_color_cache_bits : base.u32[..= 11],
+        overall_tile_size_log2   : base.u32[..= 9],
+        overall_n_huffman_groups : base.u32[..= 256],
+
+        ht_n_symbols              : base.u32[..= 2328],
+        ht_code_lengths_remaining : base.u32,
+
+        color_indexing_palette_size : base.u32[..= 256],
+        color_indexing_width        : base.u32[..= 0x4000],
+
+        // The 0th element is for the Meta (Huffman Group) selectors.
+        // The 1st element is for the Predictor transform.
+        // The 2nd element is for the Cross Color transform.
+        // The 3rd element is overall workbuf length.
+        workbuf_offset_for_transform : array[4] base.u32[..= 0x4C00_0000],
+
+        // If the Color Indexing transform is present then workbuf[i .. j]
+        // holds the pre-transformed pixel data (the Green component of the
+        // pixel's bgra data holds color indexes) and workbuf[0 .. j] holds the
+        // post-transformed data:
+        //
+        //  - i is workbuf_offset_for_color_indexing
+        //  - j is workbuf_offset_for_transform[0]
+        //
+        // i is calculated as:
+        //
+        //  - if there are 8 bits per color index then i is 0.
+        //  - if there are 4 bits per color index then i is j*1/2, roughly.
+        //  - if there are 2 bits per color index then i is j*3/4, roughly.
+        //  - if there are 1 bits per color index then i is j*7/8, roughly.
+        //
+        // The two slices (workbuf[i .. j] and workbuf[0 .. j]) overlap.
+        // apply_transform_color_indexing modifies the pixel buffer in-place.
+        workbuf_offset_for_color_indexing : base.u32[..= 0x4000_0000],
+
+        vp8 : vp8.decoder,
+
+        swizzler : base.pixel_swizzler,
+        util     : base.utility,
+) + (
+        palette     : array[4 * 256] base.u8,
+        color_cache : array[2048] base.u32,
+
+        codes        : array[2328] base.u16,
+        code_lengths : array[2328] base.u16,
+
+        // Each node is a base.u16 whose bit patterns are:
+        //
+        //  - 0000_0000_0000_0000   Invalid.
+        //  - 0CCC_CCCC_CCCC_CCCC   Branch node (children_offset is CCC).
+        //  - 1SSS_SSSS_SSSS_SSSS   Leaf node (symbol is SSS, it may be zero).
+        code_lengths_huffman_nodes : array[37] base.u16,
+
+        // A Huffman group has five (5) Huffman trees.
+        //
+        // Start  .. End     Size
+        // 0x064C .. 0x187B  0x122F  (1) Green, back-ref length, color cache.
+        // 0x0000 .. 0x01FF  0x01FF  (2) Red.
+        // 0x01FF .. 0x03FE  0x01FF  (3) Blue.
+        // 0x03FE .. 0x05FD  0x01FF  (4) Alpha.
+        // 0x05FD .. 0x064C  0x004F  (5) Back-ref distance.
+        //
+        // The Green+etc tree is last (in terms of start offset) because it's
+        // by far the largest (worst case) and its color cache component has
+        // variable length.
+        //
+        // 0x122F = 4655 = ((2 * 2328) - 1) and the same 2328 turns up in func
+        // decoder.decode_huffman_tree.
+        //
+        // 2328 is (256 + 24 + 2048), combining 256 Green values, 24 back-ref
+        // lengths and up to 2048 = (1 << 11) color cache keys.
+        //
+        // 0x01FF = 511 = ((2 * 256) - 1) is for 256 Red (Blue, Alpha) values.
+        //
+        // 0x004F = 79 = ((2 * 40) - 1) is for 40 back-ref distances.
+        //
+        // 0x187B = 6267 and (0x187B * sizeof(u16)) = 12534. Overall, this
+        // field takes 0x30_F600 = 3_208704 bytes of memory.
+        //
+        // The base.u16's bits are the same as for code_lengths_huffman_nodes.
+        huffman_nodes : array[256] array[0x187B] base.u16,
+)
+
+pub func decoder.get_quirk(key: base.u32) base.u64 {
+    return 0
+}
+
+pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+    return base."#unsupported option"
+}
+
+pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+    var status : base.status
+
+    while true {
+        status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+        if (status == base."$short read") and args.src.is_closed() {
+            return "#truncated input"
+        }
+        yield? status
+    }
+}
+
+pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+    var c32    : base.u32
+    var r_mark : base.u64
+    var status : base.status
+
+    if this.call_sequence <> 0x00 {
+        return base."#bad call sequence"
+    }
+
+    c32 = args.src.read_u32le?()
+    if c32 <> 'RIFF'le {
+        return "#bad header"
+    }
+    this.riff_chunk_length = args.src.read_u32le?()
+    if (this.riff_chunk_length & 1) <> 0 {
+        return "#bad header"
+    }
+    this.rcl_remaining = this.riff_chunk_length
+
+    while true {
+        io_limit (io: args.src, limit: this.rcl_remaining as base.u64) {
+            r_mark = args.src.mark()
+            status =? this.do_decode_image_config_limited?(dst: args.dst, src: args.src)
+            this.rcl_remaining ~sat-=
+                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+        }
+
+        if status.is_ok() {
+            break
+        } else if not status.is_suspension() {
+            return status
+        } else if (status == base."$short read") and (this.rcl_remaining == 0) {
+            return "#short chunk"
+        }
+        yield? status
+    }
+
+    this.frame_config_io_position = args.src.position()
+
+    if (this.variant <> 0x01) and (args.dst <> nullptr) {
+        args.dst.set!(
+                pixfmt: base.PIXEL_FORMAT__BGRA_NONPREMUL,
+                pixsub: 0,
+                width: this.width,
+                height: this.height,
+                first_frame_io_position: this.frame_config_io_position,
+                first_frame_is_opaque: false)
+    }
+
+    this.call_sequence = 0x20
+}
+
+pri func decoder.do_decode_image_config_limited?(dst: nptr base.image_config, src: base.io_reader) {
+    var c32    : base.u32
+    var r_mark : base.u64
+    var status : base.status
+
+    c32 = args.src.read_u32le?()
+    if c32 <> 'WEBP'le {
+        return "#bad header"
+    }
+
+    c32 = args.src.read_u32le?()
+    if c32 == 'VP8 'le {
+        this.variant = 0x01
+    } else if c32 == 'VP8L'le {
+        this.variant = 0x02
+    } else if c32 == 'VP8X'le {
+        this.variant = 0x04
+    } else {
+        return "#bad header"
+    }
+
+    this.sub_chunk_length = args.src.read_u32le?()
+    this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
+
+    if this.variant == 0x01 {
+        this.vp8.set_quirk!(
+                key: base.QUIRK_SOURCE_LENGTH,
+                value: ((this.sub_chunk_length as base.u64) << 1) | 1)
+    } else if this.variant == 0x02 {
+        // No-op.
+    } else if this.sub_chunk_length <> 10 {
+        return "#bad header"
+    }
+
+    while true {
+        io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
+            r_mark = args.src.mark()
+            if this.variant == 0x01 {
+                status =? this.vp8.decode_image_config?(dst: args.dst, src: args.src)
+            } else if this.variant == 0x02 {
+                status =? this.do_decode_image_config_limited_vp8l?(src: args.src)
+            } else {
+                status =? this.do_decode_image_config_limited_vp8x?(src: args.src)
+            }
+            this.sub_chunk_length ~sat-=
+                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+        }
+
+        if status.is_ok() {
+            break
+        } else if not status.is_suspension() {
+            return status
+        } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
+            return "#short chunk"
+        }
+        yield? status
+    }
+}
+
+pri func decoder.do_decode_image_config_limited_vp8l?(src: base.io_reader) {
+    var c32            : base.u32
+    var transform_size : base.u32[..= 0x400_0000]
+
+    c32 = args.src.read_u8_as_u32?()
+    if c32 <> 0x2F {
+        return "#bad header"
+    }
+    c32 = args.src.read_u32le?()
+    this.width = (c32 & 0x3FFF) + 1
+    c32 >>= 14
+    this.height = (c32 & 0x3FFF) + 1
+    c32 >>= 14
+    // In theory, (c32 & 1) would let us discriminate between
+    // base.PIXEL_FORMAT__BGRX and base.PIXEL_FORMAT__BGRA_NONPREMUL, but the
+    // VP8 Lossless spec says that this bit "is a hint only, and *should not
+    // impact decoding* [emphasis added]".
+    c32 >>= 1
+    if c32 <> 0 {
+        return "#bad header"
+    }
+
+    transform_size = 4 * ((this.width + 3) >> 2) * ((this.height + 3) >> 2)
+    this.workbuf_offset_for_transform[0] = (4 * this.width * this.height) + (0 * transform_size)
+    this.workbuf_offset_for_transform[1] = (4 * this.width * this.height) + (1 * transform_size)
+    this.workbuf_offset_for_transform[2] = (4 * this.width * this.height) + (2 * transform_size)
+    this.workbuf_offset_for_transform[3] = (4 * this.width * this.height) + (3 * transform_size)
+}
+
+pri func decoder.do_decode_image_config_limited_vp8x?(src: base.io_reader) {
+    var c32            : base.u32
+    var transform_size : base.u32[..= 0x400_0000]
+    var status         : base.status
+
+    c32 = args.src.read_u32le?()
+    if (c32 & 0xFFFF_FFC1) <> 0 {
+        return "#unsupported WebP file"
+    }
+    this.vp8x_header_flags = ((c32 | 0x01) & 0xFF) as base.u8
+
+    c32 = args.src.read_u24le_as_u32?()
+    if c32 >= 0x3FFF {
+        return "#unsupported WebP file"
+    }
+    this.width = (c32 & 0x3FFF) + 1
+
+    c32 = args.src.read_u24le_as_u32?()
+    if c32 >= 0x3FFF {
+        return "#unsupported WebP file"
+    }
+    this.height = (c32 & 0x3FFF) + 1
+
+    // It's valid to call this.workbuf_len after this.decode_image_config
+    // returns, for the caller to know how much dynamically-sized memory
+    // (called workbuf memory) is needed to decode the image file.
+    //
+    // Unfortunately, having only seen the VP8X chunk, we don't know yet
+    // whether it's ultimately a VP8 or VP8L image, but we wouldn't know until
+    // after we've processed the ALPH chunk (if present), and processing the
+    // ALPH chunk requires workbuf memory (as the amount of memory depends on
+    // this.width and this.height).
+    //
+    // Wuffs' "decode an image" API assumes that the caller, not callee, is
+    // responsible for dynamically allocating memory. But also, it only assumes
+    // sequential access (not random access) to the io_reader.
+    //
+    // So, here, we have to cater for the worst case and set aside workbuf
+    // memory just like plain VP8L, even if it might end up being unused, for
+    // example: VP8X+VP8 instead of VP8X+VP8L or VP8X+ALPH+VP8.
+    transform_size = 4 * ((this.width + 3) >> 2) * ((this.height + 3) >> 2)
+    this.workbuf_offset_for_transform[0] = (4 * this.width * this.height) + (0 * transform_size)
+    this.workbuf_offset_for_transform[1] = (4 * this.width * this.height) + (1 * transform_size)
+    this.workbuf_offset_for_transform[2] = (4 * this.width * this.height) + (2 * transform_size)
+    this.workbuf_offset_for_transform[3] = (4 * this.width * this.height) + (3 * transform_size)
+
+    // The RIFF chunk length (which we have seen) is an upper bound for the VP8
+    // sub-chunk length (which we haven't seen yet). Set this now so that
+    // this.vp8.workbuf_len will return something definitive (non-empty).
+    //
+    // TODO: for animated WebP images, this upper bound essentially allocates
+    // O(numberOfAnimationFrames) memory. Ideally, it'd be O(1) instead.
+    //
+    // This might need tweaking the semantics of the wuffs_base__image_decoder
+    // API (which applies to multiple image formats, not just WebP). The API is
+    // that you can call workbuf_len as soon as decode_image_config returns.
+    // workbuf_len returns a range and any value within that range should be a
+    // valid length for the "dynamically allocated, not O(1) in terms of width
+    // and height" workbuf memory passed to decode_frame.
+    //
+    // We could relax this so that decode_frame could return a "$short workbuf"
+    // suspension, if the workbuf length is unknown at the time of the first
+    // decode_frame call, and the caller is expected to essentially realloc the
+    // workbuf, keeping any existing contents when growing it.
+    status = this.vp8.set_quirk!(
+            key: base.QUIRK_SOURCE_LENGTH,
+            value: ((this.riff_chunk_length as base.u64) << 1) | 1)
+    if not status.is_ok() {
+        return "#unsupported WebP file"
+    }
+
+    status = this.vp8.set_quirk!(
+            key: vp8.QUIRK_WIDTH_AND_HEIGHT,
+            value: ((this.width as base.u64) | ((this.height as base.u64) << 32)))
+    if not status.is_ok() {
+        return "#unsupported WebP file"
+    }
+}
+
+pub func decoder.decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
+    var status : base.status
+
+    while true {
+        if this.variant == 0x01 {
+            status =? this.vp8.decode_frame_config?(dst: args.dst, src: args.src)
+        } else {
+            status =? this.do_decode_frame_config?(dst: args.dst, src: args.src)
+        }
+        if (status == base."$short read") and args.src.is_closed() {
+            return "#truncated input"
+        }
+        yield? status
+    }
+}
+
+pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
+    if this.call_sequence == 0x20 {
+        // No-op.
+    } else if this.call_sequence < 0x20 {
+        this.do_decode_image_config?(dst: nullptr, src: args.src)
+    } else if this.call_sequence == 0x28 {
+        if this.frame_config_io_position <> args.src.position() {
+            return base."#bad restart"
+        }
+    } else if this.call_sequence == 0x40 {
+        this.call_sequence = 0x60
+        return base."@end of data"
+    } else {
+        return base."@end of data"
+    }
+
+    if (this.variant <> 0x01) and (args.dst <> nullptr) {
+        args.dst.set!(bounds: this.util.make_rect_ie_u32(
+                min_incl_x: 0,
+                min_incl_y: 0,
+                max_excl_x: this.width,
+                max_excl_y: this.height),
+                duration: 0,
+                index: 0,
+                io_position: this.frame_config_io_position,
+                disposal: 0,
+                opaque_within_bounds: false,
+                overwrite_instead_of_blend: false,
+                background_color: 0x0000_0000)
+    }
+
+    this.call_sequence = 0x40
+}
+
+pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+    var status : base.status
+
+    while true {
+        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+        if (status == base."$short read") and args.src.is_closed() {
+            return "#truncated input"
+        }
+        yield? status
+    }
+}
+
+pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+    var r_mark : base.u64
+    var status : base.status
+
+    if this.call_sequence == 0x40 {
+        // No-op.
+    } else if this.call_sequence < 0x40 {
+        this.do_decode_frame_config?(dst: nullptr, src: args.src)
+    } else {
+        return base."@end of data"
+    }
+
+    while (this.variant & 0x03) == 0 {
+        this.sub_chunk_type = args.src.read_u32le?()
+        this.sub_chunk_length = args.src.read_u32le?()
+        this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
+        if this.sub_chunk_length > 0x7FFF_FFFF {
+            return "#unsupported WebP file"
+        }
+
+        if this.sub_chunk_type == 'ICCP'le {
+            if this.variant > 0x04 {
+                return "#bad chunk order"
+            } else if (this.vp8x_header_flags & 0x20) == 0 {
+                return "#bad VP8X chunk"
+            }
+            this.variant = 0x08
+
+        } else if this.sub_chunk_type == 'ANIM'le {
+            if this.variant > 0x08 {
+                return "#bad chunk order"
+            } else if (this.vp8x_header_flags & 0x02) == 0 {
+                return "#bad VP8X chunk"
+            }
+            this.variant = 0x10
+
+        } else if this.sub_chunk_type == 'ANMF'le {
+            if this.variant > 0x10 {
+                return "#bad chunk order"
+            } else if (this.vp8x_header_flags & 0x02) == 0 {
+                return "#bad VP8X chunk"
+            }
+            this.variant = 0x20
+
+        } else if this.sub_chunk_type == 'ALPH'le {
+            if this.variant > 0x20 {
+                return "#bad chunk order"
+            } else if (this.vp8x_header_flags & 0x10) == 0 {
+                return "#bad VP8X chunk"
+            }
+            this.variant = 0x40
+            this.decode_alph?(src: args.src, workbuf: args.workbuf)
+            this.vp8.set_quirk!(
+                    key: vp8.QUIRK_HAS_ALPHA_SIDE_CHANNEL,
+                    value: 1)
+
+        } else if this.sub_chunk_type == 'VP8 'le {
+            this.vp8.set_quirk!(
+                    key: base.QUIRK_SOURCE_LENGTH,
+                    value: ((this.sub_chunk_length as base.u64) << 1) | 1)
+            this.variant = 0x81
+            break
+
+        } else if this.sub_chunk_type == 'VP8L'le {
+            if (this.vp8x_header_flags & 0x10) <> 0 {
+                return "#bad ALPH+VP8L combination"
+            }
+            this.variant = 0x82
+            break
+
+        } else if this.sub_chunk_type == 'XMP 'le {
+            if (this.vp8x_header_flags & 0x04) == 0 {
+                return "#bad VP8X chunk"
+            }
+
+        } else if this.sub_chunk_type == 'EXIF'le {
+            if (this.vp8x_header_flags & 0x08) == 0 {
+                return "#bad VP8X chunk"
+            }
+        }
+
+        args.src.skip_u32?(n: this.sub_chunk_length)
+        if this.sub_chunk_has_padding {
+            args.src.skip_u32?(n: 1)
+        }
+    }
+
+    while true {
+        io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
+            r_mark = args.src.mark()
+            if (this.variant & 0x01) <> 0 {
+                status =? this.vp8.decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+            } else {
+                status =? this.do_decode_frame_vp8l?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+            }
+            this.sub_chunk_length ~sat-=
+                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+        }
+
+        if status.is_ok() {
+            break
+        } else if not status.is_suspension() {
+            return status
+        } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
+            return "#short chunk"
+        }
+        yield? status
+    }
+}
+
+pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+    if this.variant == 0x01 {
+        return this.vp8.frame_dirty_rect()
+    }
+    return this.util.make_rect_ie_u32(
+            min_incl_x: 0,
+            min_incl_y: 0,
+            max_excl_x: this.width,
+            max_excl_y: this.height)
+}
+
+pub func decoder.num_animation_loops() base.u32 {
+    return 0
+}
+
+pub func decoder.num_decoded_frame_configs() base.u64 {
+    if this.variant == 0x01 {
+        return this.vp8.num_decoded_frame_configs()
+    }
+    if this.call_sequence > 0x20 {
+        return 1
+    }
+    return 0
+}
+
+pub func decoder.num_decoded_frames() base.u64 {
+    if this.variant == 0x01 {
+        return this.vp8.num_decoded_frames()
+    }
+    if this.call_sequence > 0x40 {
+        return 1
+    }
+    return 0
+}
+
+pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+    var status : base.status
+
+    if this.variant == 0x01 {
+        status = this.vp8.restart_frame!(index: args.index, io_position: args.io_position)
+        return status
+    }
+    if this.call_sequence < 0x20 {
+        return base."#bad call sequence"
+    }
+    if (args.index <> 0) or (args.io_position <> this.frame_config_io_position) {
+        return base."#bad argument"
+    }
+    this.call_sequence = 0x28
+    return ok
+}
+
+pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
+    // No-op.
+}
+
+pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
+    return base."#no more information"
+}
+
+pub func decoder.workbuf_len() base.range_ii_u64 {
+    var r : base.range_ii_u64
+    var s : base.range_ii_u64
+
+    if this.variant == 0x01 {
+        return this.vp8.workbuf_len()
+    }
+
+    r = this.util.make_range_ii_u64(
+            min_incl: this.workbuf_offset_for_transform[3] as base.u64,
+            max_incl: this.workbuf_offset_for_transform[3] as base.u64)
+
+    if this.variant <> 0x02 {
+        s = this.vp8.workbuf_len()
+        if s.is_empty() {
+            // Empty means that the workbuf_len range isn't known yet.
+            return s
+        }
+
+        r = this.util.make_range_ii_u64(
+                min_incl: s.get_min_incl().max(no_less_than: r.get_min_incl()),
+                max_incl: s.get_max_incl().max(no_less_than: r.get_max_incl()))
+    }
+
+    return r
+}
+
+pri const DISTANCE_MAP : roarray[120] base.u8 = [
+        0x18, 0x07, 0x17, 0x19, 0x28, 0x06, 0x27, 0x29, 0x16, 0x1A,
+        0x26, 0x2A, 0x38, 0x05, 0x37, 0x39, 0x15, 0x1B, 0x36, 0x3A,
+        0x25, 0x2B, 0x48, 0x04, 0x47, 0x49, 0x14, 0x1C, 0x35, 0x3B,
+        0x46, 0x4A, 0x24, 0x2C, 0x58, 0x45, 0x4B, 0x34, 0x3C, 0x03,
+        0x57, 0x59, 0x13, 0x1D, 0x56, 0x5A, 0x23, 0x2D, 0x44, 0x4C,
+        0x55, 0x5B, 0x33, 0x3D, 0x68, 0x02, 0x67, 0x69, 0x12, 0x1E,
+        0x66, 0x6A, 0x22, 0x2E, 0x54, 0x5C, 0x43, 0x4D, 0x65, 0x6B,
+        0x32, 0x3E, 0x78, 0x01, 0x77, 0x79, 0x53, 0x5D, 0x11, 0x1F,
+        0x64, 0x6C, 0x42, 0x4E, 0x76, 0x7A, 0x21, 0x2F, 0x75, 0x7B,
+        0x31, 0x3F, 0x63, 0x6D, 0x52, 0x5E, 0x00, 0x74, 0x7C, 0x41,
+        0x4F, 0x10, 0x20, 0x62, 0x6E, 0x30, 0x73, 0x7D, 0x51, 0x5F,
+        0x40, 0x72, 0x7E, 0x61, 0x6F, 0x50, 0x71, 0x7F, 0x60, 0x70,
+]

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tocio — EXR + OCIO (ACES 2.0) on WebGL2</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>tocio <span class="sub">EXR colour management on WebGL2 — ACES 2.0, JIT→GLSL</span></h1>
+</header>
+<main>
+  <section id="viewport">
+    <canvas id="gl"></canvas>
+    <div id="drop-hint">drop an .exr here, or use “Open .exr”</div>
+    <div id="status" class="status"></div>
+  </section>
+
+  <aside id="panel">
+    <div class="group">
+      <label class="btn">Open .exr<input type="file" id="file" accept=".exr" hidden></label>
+      <div class="row">
+        <select id="sample"></select>
+        <button id="loadsample">Load</button>
+      </div>
+      <div class="hint" id="imginfo">no image</div>
+    </div>
+
+    <div class="group">
+      <label>Input colour space
+        <select id="srccs"></select>
+      </label>
+      <label>Display
+        <select id="display"></select>
+      </label>
+      <label>View
+        <select id="view"></select>
+      </label>
+      <label class="check"><input type="checkbox" id="p3"> Wide-gamut (Display-P3) output
+        <span id="p3state" class="hint"></span>
+      </label>
+      <label>Exposure <span id="evlabel">0.0 EV</span>
+        <input type="range" id="exposure" min="-6" max="6" step="0.1" value="0">
+      </label>
+    </div>
+
+    <div class="group grow">
+      <div class="row between">
+        <span class="label">OCIO config</span>
+        <button id="compile" title="Build the processor and JIT-compile a GPU shader">JIT compile ▶</button>
+      </div>
+      <div id="editorwrap">
+        <pre id="gutter" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" wrap="off"></textarea>
+      </div>
+      <div id="compilestatus" class="status mono"></div>
+    </div>
+  </aside>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

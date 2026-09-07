@@ -1,0 +1,396 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+pri func decoder.copy_partitions_to_workbuf?(src: base.io_reader, workbuf: slice base.u8) {
+    var i : base.u64
+    var j : base.u64
+    var n : base.u32
+
+    i = this.workbuf_yuv_v_end
+    j = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64)
+
+    while i < j,
+            inv j <= 0x20FF_FFF7,
+    {
+        if j > args.workbuf.length() {
+            return base."#bad workbuf length"
+        }
+        assert j > i via "a > b: b < a"()
+        n = args.src.limited_copy_u32_to_slice!(
+                up_to: ((j - i) & 0xFFFF_FFFF) as base.u32,
+                s: args.workbuf[i .. j])
+        i ~mod+= n as base.u64
+        if i < j {
+            yield? base."$short read"
+        }
+    }
+
+    // Write eight 0x00 bytes to the end of the workbuf, past what we copy from
+    // args.src. Later on, we can then always peek_u64le from the workbuf.
+
+    j += 8
+    while i < j {
+        assert i < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: j)
+        if i >= args.workbuf.length() {
+            return base."#bad workbuf length"
+        }
+        args.workbuf[i] = 0x00
+        i += 1
+    }
+}
+
+pri func decoder.decode_header_partition!(workbuf: roslice base.u8) base.status {
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+
+    // RFC 6386 Section 9.2. Color Space and Pixel Type (Key Frames Only).
+    if this.is_key_frame {
+        this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+        this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    }
+
+    // RFC 6386 Section 9.3. Segment-Based Adjustments.
+    this.decode_segment_header!(workbuf: args.workbuf)
+
+    // RFC 6386 Section 9.4. Loop Filter Type and Levels.
+    this.decode_filter_header!(workbuf: args.workbuf)
+    this.calculate_loop_filters!()
+
+    // RFC 6386 Section 9.5. Token Partition and Partition Data Offsets.
+    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 2)
+    this.num_other_partitions_m1 = ((1 as base.u32) << (v32 & 3)) - 1
+
+    // RFC 6386 Section 9.6. Dequantization Indices.
+    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 7)
+    this.quant_yac_qi = v32 & 127
+    this.quant_ydc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
+    this.quant_y2dc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
+    this.quant_y2ac_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
+    this.quant_uvdc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
+    this.quant_uvac_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
+    this.calculate_dequants!()
+
+    // RFC 6386 Section 9.7. Refresh Golden Frame and Altref Frame.
+    if not this.is_key_frame {
+        return "#unsupported VP8 file"
+    }
+
+    // RFC 6386 Section 9.8. Refresh Last Frame Buffer.
+    this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+
+    // RFC 6386 Section 9.9. DCT Coefficient Probability Update.
+    this.decode_coeff_probs!(workbuf: args.workbuf)
+
+    if not this.is_key_frame {
+        // RFC 6386 Section 9.10. Remaining Frame Header Data (Non-Key Frame).
+        return "#unsupported VP8 file"
+
+    } else {
+        // RFC 6386 Section 9.11. Remaining Frame Header Data (Key Frame).
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+        if v1 <> 0 {
+            v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
+            this.prob_skip = (v32 & 0xFF) | 0x100
+        }
+    }
+
+    return ok
+}
+
+pri func decoder.decode_segment_header!(workbuf: roslice base.u8) {
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+    var i   : base.u32
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    this.seg_enabled = v1 <> 0
+    if not this.seg_enabled {
+        this.seg_update_map = false
+        return nothing
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    this.seg_update_map = v1 <> 0
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    if v1 <> 0 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+        this.seg_absolute = v1 <> 0
+
+        i = 0
+        while i < 4 {
+            v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 7)
+            this.seg_quants[i] = (v32 & 0xFF) as base.u8
+            i += 1
+        }
+
+        i = 0
+        while i < 4 {
+            v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 6)
+            this.seg_strengths[i] = (v32 & 0xFF) as base.u8
+            i += 1
+        }
+    }
+
+    if this.seg_update_map {
+        i = 0
+        while i < 3 {
+            v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+            if v1 <> 0 {
+                v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
+                this.seg_probs[i] = (v32 & 0xFF) as base.u8
+            } else {
+                this.seg_probs[i] = 0xFF
+            }
+            i += 1
+        }
+    }
+}
+
+pri func decoder.decode_filter_header!(workbuf: roslice base.u8) {
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+    var i   : base.u32
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    this.filt_simple = v1 <> 0
+
+    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 6)
+    this.filt_level = (v32 & 0x3F) as base.u8
+
+    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 3)
+    this.filt_sharpness = (v32 & 0x07) as base.u8
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    this.filt_deltas_enabled = v1 <> 0
+    if not this.filt_deltas_enabled {
+        return nothing
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    if v1 == 0 {
+        return nothing
+    }
+
+    i = 0
+    while i < 8 {
+        v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 6)
+        this.filt_deltas[i >> 2][i & 3] = (v32 & 0xFF) as base.u8
+        i += 1
+    }
+}
+
+pri func decoder.decode_coeff_probs!(workbuf: roslice base.u8) {
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+    var i   : base.u32
+
+    i = 0
+    while i < 1056 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: COEFF_UPDATE_PROBS[i] as base.u32)
+        if v1 <> 0 {
+            v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
+            this.coeff_probs[i] = (v32 & 0xFF) as base.u8
+        } else {
+            this.coeff_probs[i] = DEFAULT_COEFF_PROBS[i]
+        }
+        i += 1
+    }
+}
+
+pri func decoder.calculate_loop_filters!() {
+    var seg    : base.u32
+    var inner  : base.u32
+    var level  : base.u32
+    var ilevel : base.u32
+    var hlevel : base.u32
+
+    seg = 0
+    while seg < 4 {
+        inner = 0
+        while inner < 2,
+                inv seg < 4,
+        {
+            level = this.filt_level as base.u32
+            if not this.seg_enabled {
+                // No-op.
+            } else if not this.filt_deltas_enabled {
+                level = this.util.sign_extend_convert_u8_u32(a: this.seg_strengths[seg])
+            } else {
+                // The (level as base.u32) is redundant, equivalent to level, but
+                // avoids a -Werror=sign-conversion false positive with gcc 12.2.0.
+                level = (level as base.u32) ~mod+
+                        this.util.sign_extend_convert_u8_u32(a: this.seg_strengths[seg])
+            }
+
+            // Yes, filt_deltas[*][0], not filt_deltas[*][seg].
+            if this.filt_deltas_enabled {
+                level = (level as base.u32) ~mod+
+                        this.util.sign_extend_convert_u8_u32(a: this.filt_deltas[0][0])
+                if inner <> 0 {
+                    level = (level as base.u32) ~mod+
+                            this.util.sign_extend_convert_u8_u32(a: this.filt_deltas[1][0])
+                }
+            }
+
+            if level >= 0x8000_0000 {
+                this.loop_filters[(2 * seg) + inner] = 0
+                inner += 1
+                continue
+
+            } else if level > 63 {
+                level = 63
+            }
+
+            ilevel = level
+            if this.filt_sharpness > 0 {
+                if this.filt_sharpness <= 4 {
+                    ilevel >>= 1
+                } else {
+                    ilevel >>= 2
+                }
+                ilevel = ilevel.max(no_less_than: (9 - this.filt_sharpness) as base.u32)
+            }
+            if (ilevel < 1) or (0x8000_0000 <= ilevel) {
+                ilevel = 1
+            }
+
+            // If we ever want to support (this.is_key_frame == false), note
+            // that the hlevel thresholds are a little different then.
+            if level < 15 {
+                hlevel = 0
+            } else if level < 40 {
+                hlevel = 1
+            } else {
+                hlevel = 2
+            }
+
+            level = (2 ~mod* level) ~mod+ ilevel
+
+            this.loop_filters[(2 * seg) + inner] =
+                    level | (ilevel ~mod<< 8) | (hlevel ~mod<< 16) | (inner << 31)
+
+            inner += 1
+        }
+        seg += 1
+    }
+}
+
+pri func decoder.calculate_dequants!() {
+    var seg : base.u32
+    var q   : base.u32
+
+    seg = 0
+    while seg < 4 {
+        q = this.quant_yac_qi
+        if not this.seg_enabled {
+            // No-op.
+        } else if this.seg_absolute {
+            q = this.util.sign_extend_convert_u8_u32(a: this.seg_quants[seg])
+        } else {
+            // The (q as base.u32) is redundant, equivalent to q, but avoids a
+            // -Werror=sign-conversion false positive with gcc 12.2.0.
+            q = (q as base.u32) ~mod+
+                    this.util.sign_extend_convert_u8_u32(a: this.seg_quants[seg])
+        }
+
+        this.dequants[seg][0][0] = DEQUANTS[0][this.clip_127(a: q ~mod+ this.quant_ydc_delta)]
+        this.dequants[seg][0][1] = DEQUANTS[1][this.clip_127(a: q)]
+        this.dequants[seg][1][0] = DEQUANTS[0][this.clip_127(a: q ~mod+ this.quant_y2dc_delta)] * 2
+        this.dequants[seg][1][1] = (DEQUANTS[1][this.clip_127(a: q ~mod+ this.quant_y2ac_delta)] * 155) / 100
+        if this.dequants[seg][1][1] < 8 {
+            this.dequants[seg][1][1] = 8
+        }
+        this.dequants[seg][2][0] = DEQUANTS[0][this.clip_127(a: q ~mod+ this.quant_uvdc_delta)]
+        if this.dequants[seg][2][0] > 132 {
+            this.dequants[seg][2][0] = 132
+        }
+        this.dequants[seg][2][1] = DEQUANTS[1][this.clip_127(a: q ~mod+ this.quant_uvac_delta)]
+
+        seg += 1
+    }
+}
+
+pri func decoder.clip_127(a: base.u32) base.u32[..= 127] {
+    if args.a <= 127 {
+        return args.a
+    } else if args.a < 0x8000_0000 {
+        return 127
+    }
+    return 0
+}
+
+pri func decoder.decode_other_partition_lengths!(workbuf: roslice base.u8) base.status {
+    var v32       : base.u32
+    var remainder : base.u32
+    var i         : base.u32
+    var o         : base.u64
+
+    remainder = this.partitioned_data_length ~sat- this.part_lens[0]
+    remainder ~sat-= 3 * this.num_other_partitions_m1
+
+    o = this.workbuf_yuv_v_end + (this.part_lens[0] as base.u64)
+    i = 0
+    while i < this.num_other_partitions_m1 {
+        assert i < 7 via "a < b: a < c; c <= b"(c: this.num_other_partitions_m1)
+
+        v32 = 0
+
+        if o >= args.workbuf.length() {
+            return "#bad header"
+        }
+        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
+        v32 |= (args.workbuf[o] as base.u32) << 0
+        o += 1
+
+        if o >= args.workbuf.length() {
+            return "#bad header"
+        }
+        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
+        v32 |= (args.workbuf[o] as base.u32) << 8
+        o += 1
+
+        if o >= args.workbuf.length() {
+            return "#bad header"
+        }
+        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
+        v32 |= (args.workbuf[o] as base.u32) << 16
+        o += 1
+
+        if remainder < v32 {
+            return "#bad header"
+        }
+        remainder -= v32
+
+        this.part_lens[1 + i] = v32
+
+        i += 1
+    }
+
+    if remainder > 0xFF_FFFF {
+        return "#unsupported VP8 file"
+    }
+    this.part_lens[1 + this.num_other_partitions_m1] = remainder
+
+    i = 0
+    while i < (1 + this.num_other_partitions_m1) {
+        assert i < 8 via "a < b: a < c; c <= b"(c: (1 + this.num_other_partitions_m1))
+
+        this.part_workbuf_ris[1 + i] = o
+        o ~mod+= this.part_lens[1 + i] as base.u64
+        if o > args.workbuf.length() {
+            return "#bad header"
+        }
+
+        i += 1
+    }
+
+    return ok
+}

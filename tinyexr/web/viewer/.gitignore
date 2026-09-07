@@ -1,0 +1,12 @@
+# Emscripten / CMake build directory
+build/
+
+# The generated WASM module + ES6 glue and the demo sample image are committed
+# (see ../../.github/workflows/gh-pages.yml) so GitHub Pages can serve the
+# viewer as a static site without an Emscripten build in CI:
+#   exr_viewer.mjs
+#   exr_viewer.wasm
+#   sample.exr
+
+# Local generator binary
+gen_sample

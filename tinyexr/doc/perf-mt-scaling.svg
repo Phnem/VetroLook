@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="760" height="400" fill="#fff"/>
+<text x="60" y="26" font-size="17" font-weight="700" fill="#111">TinyEXR decode scaling by thread count (in-tree)</text>
+<text x="60" y="44" font-size="12" fill="#666">asakusa.exr; scaling is capped by chunk count (ZIP=28 blocks, ZIPS=440).</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#eee"/>
+<text x="52" y="332.0" font-size="11" fill="#888" text-anchor="end">0</text>
+<line x1="60" y1="275.2" x2="742" y2="275.2" stroke="#eee"/>
+<text x="52" y="279.2" font-size="11" fill="#888" text-anchor="end">52</text>
+<line x1="60" y1="222.4" x2="742" y2="222.4" stroke="#eee"/>
+<text x="52" y="226.4" font-size="11" fill="#888" text-anchor="end">104</text>
+<line x1="60" y1="169.6" x2="742" y2="169.6" stroke="#eee"/>
+<text x="52" y="173.6" font-size="11" fill="#888" text-anchor="end">156</text>
+<line x1="60" y1="116.8" x2="742" y2="116.8" stroke="#eee"/>
+<text x="52" y="120.8" font-size="11" fill="#888" text-anchor="end">208</text>
+<line x1="60" y1="64.0" x2="742" y2="64.0" stroke="#eee"/>
+<text x="52" y="68.0" font-size="11" fill="#888" text-anchor="end">260</text>
+<text x="16" y="196" font-size="12" fill="#666" transform="rotate(-90 16 196)" text-anchor="middle">megapixels / s</text>
+<rect x="77.7" y="276.8" width="23.2" height="51.2" fill="#2563eb" rx="2"/>
+<text x="89.3" y="272.8" font-size="9" fill="#444" text-anchor="middle">50.4</text>
+<rect x="103.0" y="304.4" width="23.2" height="23.6" fill="#16a34a" rx="2"/>
+<text x="114.6" y="300.4" font-size="9" fill="#444" text-anchor="middle">23.2</text>
+<rect x="128.2" y="279.3" width="23.2" height="48.7" fill="#7c3aed" rx="2"/>
+<text x="139.8" y="275.3" font-size="9" fill="#444" text-anchor="middle">48</text>
+<rect x="153.4" y="303.0" width="23.2" height="25.0" fill="#f59e0b" rx="2"/>
+<text x="165.1" y="299.0" font-size="9" fill="#444" text-anchor="middle">24.6</text>
+<text x="128.2" y="346" font-size="12" fill="#333" text-anchor="middle">1</text>
+<rect x="214.1" y="241.7" width="23.2" height="86.3" fill="#2563eb" rx="2"/>
+<text x="225.7" y="237.7" font-size="9" fill="#444" text-anchor="middle">85</text>
+<rect x="239.4" y="286.0" width="23.2" height="42.0" fill="#16a34a" rx="2"/>
+<text x="251.0" y="282.0" font-size="9" fill="#444" text-anchor="middle">41.4</text>
+<rect x="264.6" y="245.8" width="23.2" height="82.2" fill="#7c3aed" rx="2"/>
+<text x="276.2" y="241.8" font-size="9" fill="#444" text-anchor="middle">81</text>
+<rect x="289.8" y="287.2" width="23.2" height="40.8" fill="#f59e0b" rx="2"/>
+<text x="301.5" y="283.2" font-size="9" fill="#444" text-anchor="middle">40.2</text>
+<text x="264.6" y="346" font-size="12" fill="#333" text-anchor="middle">2</text>
+<rect x="350.5" y="180.2" width="23.2" height="147.8" fill="#2563eb" rx="2"/>
+<text x="362.1" y="176.2" font-size="9" fill="#444" text-anchor="middle">145.6</text>
+<rect x="375.8" y="247.8" width="23.2" height="80.2" fill="#16a34a" rx="2"/>
+<text x="387.4" y="243.8" font-size="9" fill="#444" text-anchor="middle">79</text>
+<rect x="401.0" y="185.8" width="23.2" height="142.2" fill="#7c3aed" rx="2"/>
+<text x="412.6" y="181.8" font-size="9" fill="#444" text-anchor="middle">140</text>
+<rect x="426.2" y="263.5" width="23.2" height="64.5" fill="#f59e0b" rx="2"/>
+<text x="437.9" y="259.5" font-size="9" fill="#444" text-anchor="middle">63.5</text>
+<text x="401.0" y="346" font-size="12" fill="#333" text-anchor="middle">4</text>
+<rect x="486.9" y="111.2" width="23.2" height="216.8" fill="#2563eb" rx="2"/>
+<text x="498.5" y="107.2" font-size="9" fill="#444" text-anchor="middle">213.5</text>
+<rect x="512.2" y="186.5" width="23.2" height="141.5" fill="#16a34a" rx="2"/>
+<text x="523.8" y="182.5" font-size="9" fill="#444" text-anchor="middle">139.4</text>
+<rect x="537.4" y="118.8" width="23.2" height="209.2" fill="#7c3aed" rx="2"/>
+<text x="549.0" y="114.8" font-size="9" fill="#444" text-anchor="middle">206</text>
+<rect x="562.6" y="235.3" width="23.2" height="92.7" fill="#f59e0b" rx="2"/>
+<text x="574.3" y="231.3" font-size="9" fill="#444" text-anchor="middle">91.3</text>
+<text x="537.4" y="346" font-size="12" fill="#333" text-anchor="middle">8</text>
+<rect x="623.3" y="73.1" width="23.2" height="254.9" fill="#2563eb" rx="2"/>
+<text x="634.9" y="69.1" font-size="9" fill="#444" text-anchor="middle">251</text>
+<rect x="648.6" y="121.3" width="23.2" height="206.7" fill="#16a34a" rx="2"/>
+<text x="660.2" y="117.3" font-size="9" fill="#444" text-anchor="middle">203.6</text>
+<rect x="673.8" y="82.2" width="23.2" height="245.8" fill="#7c3aed" rx="2"/>
+<text x="685.4" y="78.2" font-size="9" fill="#444" text-anchor="middle">242.1</text>
+<rect x="699.0" y="215.8" width="23.2" height="112.2" fill="#f59e0b" rx="2"/>
+<text x="710.7" y="211.8" font-size="9" fill="#444" text-anchor="middle">110.5</text>
+<text x="673.8" y="346" font-size="12" fill="#333" text-anchor="middle">16</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#bbb"/>
+<rect x="60" y="370" width="12" height="12" fill="#2563eb" rx="2"/>
+<text x="77" y="380" font-size="12" fill="#333">zip</text>
+<rect x="103.6" y="370" width="12" height="12" fill="#16a34a" rx="2"/>
+<text x="120.6" y="380" font-size="12" fill="#333">zips</text>
+<rect x="154.39999999999998" y="370" width="12" height="12" fill="#7c3aed" rx="2"/>
+<text x="171.39999999999998" y="380" font-size="12" fill="#333">pxr24</text>
+<rect x="212.39999999999998" y="370" width="12" height="12" fill="#f59e0b" rx="2"/>
+<text x="229.39999999999998" y="380" font-size="12" fill="#333">piz</text>
+</svg>

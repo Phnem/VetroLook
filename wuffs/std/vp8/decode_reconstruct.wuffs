@@ -1,0 +1,299 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// Reconstructing YUV samples involves adding predictions (based on previous
+// YUV samples, in macroblocks one column left or one column above) to
+// residuals (decoded from the bitstream, dequantized and IDCT'ed).
+//
+// There are 16×16 = 256 luma and 2×8×8 = 128 chroma samples per macroblock.
+// The decoder.yuv_cache field is a bit larger than that, being an array[26]
+// array[32] base.u8. Here's the layout.
+//
+//  0 1 2 3 4 5 6 7  8 9 A B C D E F  0 1 2 3 4 5 6 7  8 9 A B C D E F
+//  . . . . . . . a  b b b b b b b b  b b b b b b b b  c c c c . . . .    00
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    01
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    02
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    03
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  c c c c . . . .    04
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    05
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    06
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    07
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  c c c c . . . .    08
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    09
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    0A
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    0B
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  c c c c . . . .    0C
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    0D
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    0E
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    0F
+//  . . . . . . . d  Y Y Y Y Y Y Y Y  Y Y Y Y Y Y Y Y  . . . . . . . .    10
+//  . . . . . . . e  f f f f f f f f  . . . . . . . g  h h h h h h h h    11
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    12
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    13
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    14
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    15
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    16
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    17
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    18
+//  . . . . . . . i  U U U U U U U U  . . . . . . . j  V V V V V V V V    19
+//
+// Y, U and V are this macroblock's luma and chroma values.
+//
+// The Y predictions (per 4×4 subblock) depend on the row above's Y values
+// (either abc or dYc) and the column left's Y values (ad or bY).
+//
+// The U predictions (per 8×8 block) depend on the row above's U values (ef)
+// and the column left's U values (i).
+//
+// The V predictions (per 8×8 block) depend on the row above's V values (gh)
+// and the column left's V values (j).
+//
+// For top-row (mby == 0) macroblocks, abcefgh is initialized to 0x7F. For
+// other macroblocks, these are copied from the bottom-most row of the
+// macroblock above (before filtering, for I-Frames), from the workbuf.
+//
+// The c values are then duplicated from row 0x00 to rows 0x04, 0x08 and 0x0C.
+//
+// For left-column (mbx == 0) macroblocks, adeigj are initialized to 0x81 (but
+// aeg is 0x7F if mby is also 0). For other macroblocks, these are copied from
+// the right-most column of the macroblock to the left (before filtering, for
+// I-Frames), from the yuv_cache to itself, shifted by 8 or 16 columns.
+
+pri func decoder.reconstruct!(
+        workbuf: slice base.u8,
+        mbx: base.u32[..= 0x3FF],
+        mby: base.u32[..= 0x3FF],
+        luma_mode: base.u32[..= 4],
+        chroma_mode: base.u32[..= 3]) {
+    var mode : base.u32[..= 12]
+    var b    : base.u32
+    var mask : base.u32
+
+    this.prepare_yuv_cache!(workbuf: args.workbuf, mbx: args.mbx, mby: args.mby)
+
+    if args.luma_mode < 4 {
+        mode = this.substitute_dc_top_left(mode: args.luma_mode, mbx: args.mbx, mby: args.mby)
+        this.predict_y16!(mode: mode)
+    }
+
+    b = 0
+    while b < 16 {
+        if args.luma_mode >= 4 {
+            this.predict_y4!(b: b)
+        }
+
+        mask = (1 as base.u32) << (b + 0x00)
+        if (this.mb_ac_nz & mask) <> 0 {
+            this.inverse_dct_full!(
+                    cachex: ((b & 0x3) * 4) + 0x08,
+                    cachey: ((b & 0xC) * 1) + 0x01,
+                    b: (b + 0x00))
+        } else if (this.mb_dc_nz & mask) <> 0 {
+            this.inverse_dct_dc_only!(
+                    cachex: ((b & 0x3) * 4) + 0x08,
+                    cachey: ((b & 0xC) * 1) + 0x01,
+                    b: (b + 0x00))
+        }
+        b += 1
+    }
+
+    mode = this.substitute_dc_top_left(mode: args.chroma_mode, mbx: args.mbx, mby: args.mby)
+
+    this.predict_uv8!(b: 0, mode: mode)
+
+    if (this.mb_ac_nz & 0x0F_0000) <> 0 {
+        b = 0
+        while b < 4 {
+            this.inverse_dct_full!(
+                    cachex: ((b & 0x1) * 4) + 0x08,
+                    cachey: ((b & 0x2) * 2) + 0x12,
+                    b: (b + 0x10))
+            b += 1
+        }
+    } else if (this.mb_dc_nz & 0x0F_0000) <> 0 {
+        b = 0
+        while b < 4 {
+            this.inverse_dct_dc_only!(
+                    cachex: ((b & 0x1) * 4) + 0x08,
+                    cachey: ((b & 0x2) * 2) + 0x12,
+                    b: (b + 0x10))
+            b += 1
+        }
+    }
+
+    this.predict_uv8!(b: 1, mode: mode)
+
+    if (this.mb_ac_nz & 0xF0_0000) <> 0 {
+        b = 0
+        while b < 4 {
+            this.inverse_dct_full!(
+                    cachex: ((b & 0x1) * 4) + 0x18,
+                    cachey: ((b & 0x2) * 2) + 0x12,
+                    b: (b + 0x14))
+            b += 1
+        }
+    } else if (this.mb_dc_nz & 0xF0_0000) <> 0 {
+        b = 0
+        while b < 4 {
+            this.inverse_dct_dc_only!(
+                    cachex: ((b & 0x1) * 4) + 0x18,
+                    cachey: ((b & 0x2) * 2) + 0x12,
+                    b: (b + 0x14))
+            b += 1
+        }
+    }
+}
+
+pri func decoder.substitute_dc_top_left(
+        mode: base.u32[..= 3],
+        mbx: base.u32[..= 0x3FF],
+        mby: base.u32[..= 0x3FF]) base.u32[..= 12] {
+    if args.mode == 0 {  // DC.
+        if args.mbx == 0 {
+            if args.mby == 0 {
+                return 12  // DCTopLeft.
+            } else {
+                return 11  // DCLeft.
+            }
+        } else if args.mby == 0 {
+            return 10  // DCTop.
+        }
+    }
+    return args.mode
+}
+
+pri func decoder.prepare_yuv_cache!(
+        workbuf: roslice base.u8,
+        mbx: base.u32[..= 0x3FF],
+        mby: base.u32[..= 0x3FF]) {
+    var i      : base.u32
+    var j      : base.u32
+    var offset : base.u64[..= 0x17FE_FFF8]
+    var o      : base.u64
+
+    // For abcdefghij comments, see the layout at the top of this file.
+
+    if args.mbx <= 0 {
+        // Initialize adeigj to 0x81.
+        j = 0x00
+        while j < 0x11 {
+            this.yuv_cache[j][0x07] = 0x81
+            j += 1
+        }
+        while j < 0x1A {
+            this.yuv_cache[j][0x07] = 0x81
+            this.yuv_cache[j][0x17] = 0x81
+            j += 1
+        }
+
+    } else {
+        // Copy from the previous (left) macroblock, in yuv_cache, to adeigj.
+        j = 0x00
+        while j < 0x11 {
+            this.yuv_cache[j][0x07] = this.yuv_cache[j][0x17]
+            j += 1
+        }
+        while j < 0x1A {
+            this.yuv_cache[j][0x07] = this.yuv_cache[j][0x0F]
+            this.yuv_cache[j][0x17] = this.yuv_cache[j][0x1F]
+            j += 1
+        }
+    }
+
+    if args.mby <= 0 {
+        // Initialize abcefgh to 0x7F.
+        i = 0x00
+        while i < 0x20 {
+            this.yuv_cache[0x00][i] = 0x7F
+            i += 1
+        }
+        i = 0x00
+        while i < 0x20 {
+            this.yuv_cache[0x11][i] = 0x7F
+            i += 1
+        }
+
+    } else {
+        // Copy from the previous (above) macroblock, in args.workbuf, to bcfh.
+
+        offset = 0 +
+                (((((args.mby * 16) - 1) * this.workbuf_yuv_y_stride) + (args.mbx * 16)) as base.u64)
+        i = 0x00
+        while i < 0x10,
+                inv args.mby > 0,
+        {
+            o = offset + (i as base.u64)
+            if o < args.workbuf.length() {
+                this.yuv_cache[0x00][0x08 + i] = args.workbuf[o]
+            }
+            i += 1
+        }
+
+        if (args.mbx + 1) < this.mbw {
+            while i < 0x14,
+                    inv args.mby > 0,
+            {
+                o = offset + (i as base.u64)
+                if o < args.workbuf.length() {
+                    this.yuv_cache[0x00][0x08 + i] = args.workbuf[o]
+                }
+                i += 1
+            }
+        } else {
+            while i < 0x14,
+                    inv args.mby > 0,
+            {
+                o = offset + (0x0F as base.u64)
+                if o < args.workbuf.length() {
+                    this.yuv_cache[0x00][0x08 + i] = args.workbuf[o]
+                }
+                i += 1
+            }
+        }
+
+        offset = this.workbuf_yuv_y_end +
+                (((((args.mby * 8) - 1) * this.workbuf_yuv_uv_stride) + (args.mbx * 8)) as base.u64)
+        i = 0x00
+        while i < 0x08,
+                inv args.mby > 0,
+        {
+            o = offset + (i as base.u64)
+            if o < args.workbuf.length() {
+                this.yuv_cache[0x11][0x08 + i] = args.workbuf[o]
+            }
+            i += 1
+        }
+
+        offset = this.workbuf_yuv_u_end +
+                (((((args.mby * 8) - 1) * this.workbuf_yuv_uv_stride) + (args.mbx * 8)) as base.u64)
+        i = 0x00
+        while i < 0x08,
+                inv args.mby > 0,
+        {
+            o = offset + (i as base.u64)
+            if o < args.workbuf.length() {
+                this.yuv_cache[0x11][0x18 + i] = args.workbuf[o]
+            }
+            i += 1
+        }
+    }
+
+    // Duplicate the c values.
+    j = 0x04
+    while j < 0x10 {
+        this.yuv_cache[j][0x18] = this.yuv_cache[0][0x18]
+        this.yuv_cache[j][0x19] = this.yuv_cache[0][0x19]
+        this.yuv_cache[j][0x1A] = this.yuv_cache[0][0x1A]
+        this.yuv_cache[j][0x1B] = this.yuv_cache[0][0x1B]
+        j += 4
+    }
+}

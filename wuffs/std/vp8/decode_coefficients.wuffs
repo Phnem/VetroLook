@@ -1,0 +1,329 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// RFC 6386 Section 13. DCT Coefficient Decoding.
+//
+// and
+//
+// RFC 6386 Section 13.2. Coding of Individual Coefficient Values.
+
+pri func decoder.decode_coefficients!(
+        workbuf: slice base.u8,
+        mbx: base.u32[..= 0x3FF],
+        mby: base.u32[..= 0x3FF],
+        seg: base.u32[..= 3],
+        luma_mode: base.u32[..= 4]) base.u32[..= 1] {
+    var bc    : base.u32
+    var by    : base.u32
+    var bx    : base.u32
+    var b     : base.u32[..= 23]
+    var plane : base.u32[..= 3]
+    var lnz   : base.u32[..= 1]
+    var tnz   : base.u32[..= 1]
+    var bit   : base.u32[..= 1]
+
+    this.mb_dc_nz = 0
+    this.mb_ac_nz = 0
+    this.initialize_mb_coeffs!()
+
+    // Handle "intra16x16 prediction".
+    plane = 3  // Plane 3: Y beginning at coefficient 0.
+    if args.luma_mode < 4 {
+        lnz = 1 & (this.mb_states_left >> 23)
+        this.mb_states_left &= 0xFF7F_FFFF
+
+        tnz = 1 & (this.mb_states_top[args.mbx] >> 23)
+        this.mb_states_top[args.mbx] &= 0xFF7F_FFFF
+
+        lnz = this.decode_subblock_coefficients!(
+                workbuf: args.workbuf,
+                mby: args.mby,
+                seg: args.seg,
+                b: 24,
+                plane: 1,  // Plane 1: Y2.
+                context: lnz + tnz)
+
+        this.mb_states_top[args.mbx] |= lnz << 23
+        this.mb_states_left |= lnz << 23
+
+        this.inverse_wht!()
+        plane = 0  // Plane 0: Y beginning at coefficient 1.
+    }
+
+    // Parse Luma coefficients.
+
+    by = 0
+    while by < 4 {
+        lnz = 1 & (this.mb_states_left >> (24 + by))
+        this.mb_states_left &= 0xFFFF_FFFF ^ ((1 as base.u32) << (24 + by))
+
+        bx = 0
+        while bx < 4,
+                inv by < 4,
+        {
+            tnz = 1 & (this.mb_states_top[args.mbx] >> (24 + bx))
+            this.mb_states_top[args.mbx] &= 0xFFFF_FFFF ^ ((1 as base.u32) << (24 + bx))
+
+            b = (4 * by) + bx
+
+            lnz = this.decode_subblock_coefficients!(
+                    workbuf: args.workbuf,
+                    mby: args.mby,
+                    seg: args.seg,
+                    b: b,
+                    plane: plane,
+                    context: lnz + tnz)
+
+            bit = 0
+            if this.mb_coeffs[b][0] <> 0 {
+                bit = 1
+            }
+            this.mb_dc_nz |= bit << b
+            this.mb_ac_nz |= lnz << b
+            this.mb_states_top[args.mbx] |= lnz << (24 + bx)
+
+            bx += 1
+        }
+        this.mb_states_left |= lnz << (24 + by)
+
+        by += 1
+    }
+
+    // Parse Chroma coefficients.
+
+    bc = 0
+    while bc <= 2 {
+        by = 0
+        while by < 2,
+                inv bc <= 2,
+        {
+            lnz = 1 & (this.mb_states_left >> (28 + bc + by))
+            this.mb_states_left &= 0xFFFF_FFFF ^ ((1 as base.u32) << (28 + bc + by))
+
+            bx = 0
+            while bx < 2,
+                    inv bc <= 2,
+                    inv by < 2,
+            {
+                tnz = 1 & (this.mb_states_top[args.mbx] >> (28 + bc + bx))
+                this.mb_states_top[args.mbx] &= 0xFFFF_FFFF ^ ((1 as base.u32) << (28 + bc + bx))
+
+                b = (2 * bc) + (2 * by) + bx + 16
+                lnz = this.decode_subblock_coefficients!(
+                        workbuf: args.workbuf,
+                        mby: args.mby,
+                        seg: args.seg,
+                        b: b,
+                        plane: 2,  // Plane 2: U or V.
+                        context: lnz + tnz)
+
+                this.mb_states_top[args.mbx] |= lnz << (28 + bc + bx)
+                bit = 0
+                if this.mb_coeffs[b][0] <> 0 {
+                    bit = 1
+                }
+                this.mb_dc_nz |= bit << b
+                this.mb_ac_nz |= lnz << b
+
+                bx += 1
+            }
+            this.mb_states_left |= lnz << (28 + bc + by)
+
+            by += 1
+        }
+        bc += 2
+    }
+
+    if (this.mb_dc_nz == 0) and (this.mb_ac_nz == 0) {
+        return 1
+    }
+    return 0
+}
+
+pri func decoder.initialize_mb_coeffs!() {
+    var i : base.u32
+    var j : base.u32
+
+    i = 0
+    while i < 25 {
+        j = 0
+        while j < 16,
+                inv i < 25,
+        {
+            this.mb_coeffs[i][j] = 0
+            j += 1
+        }
+        i += 1
+    }
+}
+
+pri func decoder.decode_subblock_coefficients!(
+        workbuf: slice base.u8,
+        mby: base.u32[..= 0x3FF],
+        seg: base.u32[..= 3],
+        b: base.u32[..= 24],
+        plane: base.u32[..= 3],
+        context: base.u32[..= 2]) base.u32[..= 1] {
+    var q1        : base.u32[..= 2]
+    var q2        : base.u32[..= 1]
+    var quant     : base.u32
+    var i         : base.u32
+    var part      : base.u32[..= 8]
+    var prob_base : base.u32[..= 1045]
+    var v1        : base.u32[..= 1]
+    var value     : base.u32
+
+    q1 = 0
+    if args.b == 24 {
+        q1 = 1
+    } else if args.b >= 16 {
+        q1 = 2
+    }
+
+    i = 0
+    assert i <= 1
+    if args.plane == 0 {
+        i = 1
+        assert i <= 1
+    }
+
+    part = 1 + (args.mby & this.num_other_partitions_m1)
+    prob_base = (args.plane * (8 * 3 * 11)) + COEFF_BANDS_33[i] + (args.context * 11)
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: part,
+            prob: this.coeff_probs[prob_base + 0] as base.u32)
+    if v1 == 0 {
+        return 0
+    }
+
+    while true,
+            pre i < 16,
+    {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: part,
+                prob: this.coeff_probs[prob_base + 1] as base.u32)
+        if v1 == 0 {
+            i += 1
+            if i >= 16 {
+                break
+            }
+            prob_base = (args.plane * (8 * 3 * 11)) + COEFF_BANDS_33[i + 0] + (0 * 11)
+            continue
+        }
+
+        v1 = this.read_bit!(workbuf: args.workbuf, part: part,
+                prob: this.coeff_probs[prob_base + 2] as base.u32)
+        if v1 == 0 {
+            value = 1
+            prob_base = (args.plane * (8 * 3 * 11)) + COEFF_BANDS_33[i + 1] + (1 * 11)
+        } else {
+            value = this.decode_large_value!(
+                    workbuf: args.workbuf,
+                    part: part,
+                    prob_base: prob_base)
+            prob_base = (args.plane * (8 * 3 * 11)) + COEFF_BANDS_33[i + 1] + (2 * 11)
+        }
+
+        v1 = this.read_bit!(workbuf: args.workbuf, part: part, prob: 128)
+        if v1 <> 0 {
+            value = 0 ~mod- value
+        }
+
+        q2 = 0
+        if i <> 0 {
+            q2 = 1
+        }
+        quant = this.dequants[args.seg][q1][q2] as base.u32
+        this.mb_coeffs[args.b][ZIGZAG[i]] = ((value ~mod* quant) & 0xFFFF) as base.u16
+
+        if i >= 15 {
+            break
+        }
+
+        v1 = this.read_bit!(workbuf: args.workbuf, part: part,
+                prob: this.coeff_probs[prob_base + 0] as base.u32)
+        if v1 == 0 {
+            break
+        }
+
+        i += 1
+    }
+
+    return 1
+}
+
+pri func decoder.decode_large_value!(
+        workbuf: slice base.u8,
+        part: base.u32[..= 8],
+        prob_base: base.u32[..= 1045]) base.u32[2 ..= 2114] {
+    var v1       : base.u32[..= 1]
+    var w1       : base.u32[..= 1]
+    var category : base.u32[..= 3]
+    var value    : base.u32
+    var i        : base.u32[..= 15]
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+            prob: this.coeff_probs[args.prob_base + 3] as base.u32)
+    if v1 == 0 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: this.coeff_probs[args.prob_base + 4] as base.u32)
+        if v1 == 0 {
+            return 2
+        }
+
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: this.coeff_probs[args.prob_base + 5] as base.u32)
+        return 3 + v1
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+            prob: this.coeff_probs[args.prob_base + 6] as base.u32)
+    if v1 == 0 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: this.coeff_probs[args.prob_base + 7] as base.u32)
+        if v1 == 0 {
+            // Category 1.
+            v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                    prob: 159)
+            return 5 + v1
+        }
+
+        // Category 2.
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: 165)
+        w1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: 145)
+        return 7 + (2 * v1) + w1
+    }
+
+    // Categories 3, 4, 5, 6.
+    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+            prob: this.coeff_probs[args.prob_base + 8] as base.u32)
+    w1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+            prob: this.coeff_probs[args.prob_base + 9 + v1] as base.u32)
+    category = (2 * v1) + w1
+
+    // Read 3, 4, 5 or 11 extra bits, depending on the category.
+    value = 0
+    i = 0
+    while true {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part,
+                prob: CATEGORY_PROBS[category][i] as base.u32)
+        value ~mod<<= 1
+        value ~mod+= v1
+
+        i = (i + 1) & 15
+        if CATEGORY_PROBS[category][i] == 0 {
+            break
+        }
+    }
+    return (value & 0x7FF) + ((8 as base.u32) << category) + 3
+}

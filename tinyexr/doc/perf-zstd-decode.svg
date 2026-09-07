@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="400" viewBox="0 0 620 400" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="620" height="400" fill="#fff"/>
+<text x="60" y="26" font-size="17" font-weight="700" fill="#111">ZSTD vs ZIP decode - identical images</text>
+<text x="60" y="44" font-size="12" fill="#666">6 openexr-images ScanLines files re-encoded to each codec.</text>
+<line x1="60" y1="328.0" x2="602" y2="328.0" stroke="#eee"/>
+<text x="52" y="332.0" font-size="11" fill="#888" text-anchor="end">0</text>
+<line x1="60" y1="275.2" x2="602" y2="275.2" stroke="#eee"/>
+<text x="52" y="279.2" font-size="11" fill="#888" text-anchor="end">90</text>
+<line x1="60" y1="222.4" x2="602" y2="222.4" stroke="#eee"/>
+<text x="52" y="226.4" font-size="11" fill="#888" text-anchor="end">180</text>
+<line x1="60" y1="169.6" x2="602" y2="169.6" stroke="#eee"/>
+<text x="52" y="173.6" font-size="11" fill="#888" text-anchor="end">270</text>
+<line x1="60" y1="116.8" x2="602" y2="116.8" stroke="#eee"/>
+<text x="52" y="120.8" font-size="11" fill="#888" text-anchor="end">360</text>
+<line x1="60" y1="64.0" x2="602" y2="64.0" stroke="#eee"/>
+<text x="52" y="68.0" font-size="11" fill="#888" text-anchor="end">450</text>
+<text x="16" y="196" font-size="12" fill="#666" transform="rotate(-90 16 196)" text-anchor="middle">megapixels / s</text>
+<rect x="288.4" y="87.5" width="42.6" height="240.5" fill="#7c3aed" rx="2"/>
+<text x="309.7" y="83.5" font-size="9" fill="#444" text-anchor="middle">410</text>
+<rect x="331.0" y="168.4" width="42.6" height="159.6" fill="#16a34a" rx="2"/>
+<text x="352.3" y="164.4" font-size="9" fill="#444" text-anchor="middle">272</text>
+<text x="331.0" y="346" font-size="12" fill="#333" text-anchor="middle">decode</text>
+<line x1="60" y1="328.0" x2="602" y2="328.0" stroke="#bbb"/>
+<rect x="60" y="370" width="12" height="12" fill="#7c3aed" rx="2"/>
+<text x="77" y="380" font-size="12" fill="#333">zstd (vendored)</text>
+<rect x="189" y="370" width="12" height="12" fill="#16a34a" rx="2"/>
+<text x="206" y="380" font-size="12" fill="#333">zip (libdeflate)</text>
+</svg>

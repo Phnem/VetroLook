@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="760" height="400" fill="#fff"/>
+<text x="60" y="26" font-size="17" font-weight="700" fill="#111">Encode throughput - libdeflate on/off vs OpenEXR (single thread)</text>
+<text x="60" y="44" font-size="12" fill="#666">AMD Ryzen 9 3950X (Zen2), asakusa.exr 660x440, in-memory. Higher is better. htj2k has no deflate path.</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#eee"/>
+<text x="52" y="332.0" font-size="11" fill="#888" text-anchor="end">0</text>
+<line x1="60" y1="284.0" x2="742" y2="284.0" stroke="#eee"/>
+<text x="52" y="288.0" font-size="11" fill="#888" text-anchor="end">6</text>
+<line x1="60" y1="240.0" x2="742" y2="240.0" stroke="#eee"/>
+<text x="52" y="244.0" font-size="11" fill="#888" text-anchor="end">12</text>
+<line x1="60" y1="196.0" x2="742" y2="196.0" stroke="#eee"/>
+<text x="52" y="200.0" font-size="11" fill="#888" text-anchor="end">18</text>
+<line x1="60" y1="152.0" x2="742" y2="152.0" stroke="#eee"/>
+<text x="52" y="156.0" font-size="11" fill="#888" text-anchor="end">24</text>
+<line x1="60" y1="108.0" x2="742" y2="108.0" stroke="#eee"/>
+<text x="52" y="112.0" font-size="11" fill="#888" text-anchor="end">30</text>
+<line x1="60" y1="64.0" x2="742" y2="64.0" stroke="#eee"/>
+<text x="52" y="68.0" font-size="11" fill="#888" text-anchor="end">36</text>
+<text x="16" y="196" font-size="12" fill="#666" transform="rotate(-90 16 196)" text-anchor="middle">megapixels / s</text>
+<rect x="79.2" y="257.6" width="30.0" height="70.4" fill="#2563eb" rx="2"/>
+<text x="94.2" y="253.6" font-size="9" fill="#444" text-anchor="middle">9.6</text>
+<rect x="113.2" y="215.8" width="30.0" height="112.2" fill="#16a34a" rx="2"/>
+<text x="128.2" y="211.8" font-size="9" fill="#444" text-anchor="middle">15.3</text>
+<rect x="147.2" y="225.3" width="30.0" height="102.7" fill="#f59e0b" rx="2"/>
+<text x="162.2" y="221.3" font-size="9" fill="#444" text-anchor="middle">14</text>
+<text x="128.2" y="346" font-size="12" fill="#333" text-anchor="middle">zip</text>
+<rect x="215.6" y="252.5" width="30.0" height="75.5" fill="#2563eb" rx="2"/>
+<text x="230.6" y="248.5" font-size="9" fill="#444" text-anchor="middle">10.3</text>
+<rect x="249.6" y="209.2" width="30.0" height="118.8" fill="#16a34a" rx="2"/>
+<text x="264.6" y="205.2" font-size="9" fill="#444" text-anchor="middle">16.2</text>
+<rect x="283.6" y="219.5" width="30.0" height="108.5" fill="#f59e0b" rx="2"/>
+<text x="298.6" y="215.5" font-size="9" fill="#444" text-anchor="middle">14.8</text>
+<text x="264.6" y="346" font-size="12" fill="#333" text-anchor="middle">zips</text>
+<rect x="352.0" y="260.5" width="30.0" height="67.5" fill="#2563eb" rx="2"/>
+<text x="367.0" y="256.5" font-size="9" fill="#444" text-anchor="middle">9.2</text>
+<rect x="386.0" y="207.7" width="30.0" height="120.3" fill="#16a34a" rx="2"/>
+<text x="401.0" y="203.7" font-size="9" fill="#444" text-anchor="middle">16.4</text>
+<rect x="420.0" y="212.1" width="30.0" height="115.9" fill="#f59e0b" rx="2"/>
+<text x="435.0" y="208.1" font-size="9" fill="#444" text-anchor="middle">15.8</text>
+<text x="401.0" y="346" font-size="12" fill="#333" text-anchor="middle">pxr24</text>
+<rect x="505.4" y="247.3" width="30.0" height="80.7" fill="#2563eb" rx="2"/>
+<text x="520.4" y="243.3" font-size="9" fill="#444" text-anchor="middle">11</text>
+<rect x="539.4" y="84.5" width="30.0" height="243.5" fill="#f59e0b" rx="2"/>
+<text x="554.4" y="80.5" font-size="9" fill="#444" text-anchor="middle">33.2</text>
+<text x="537.4" y="346" font-size="12" fill="#333" text-anchor="middle">htj2k256</text>
+<rect x="641.8" y="242.9" width="30.0" height="85.1" fill="#2563eb" rx="2"/>
+<text x="656.8" y="238.9" font-size="9" fill="#444" text-anchor="middle">11.6</text>
+<rect x="675.8" y="96.3" width="30.0" height="231.7" fill="#f59e0b" rx="2"/>
+<text x="690.8" y="92.3" font-size="9" fill="#444" text-anchor="middle">31.6</text>
+<text x="673.8" y="346" font-size="12" fill="#333" text-anchor="middle">htj2k32</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#bbb"/>
+<rect x="60" y="370" width="12" height="12" fill="#2563eb" rx="2"/>
+<text x="77" y="380" font-size="12" fill="#333">tinyexr (in-tree)</text>
+<rect x="216" y="370" width="12" height="12" fill="#16a34a" rx="2"/>
+<text x="233" y="380" font-size="12" fill="#333">tinyexr (libdeflate)</text>
+<rect x="393" y="370" width="12" height="12" fill="#f59e0b" rx="2"/>
+<text x="410" y="380" font-size="12" fill="#333">OpenEXR</text>
+</svg>

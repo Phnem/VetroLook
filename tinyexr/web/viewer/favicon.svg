@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#1c1f26"/>
+  <rect x="4.5" y="4.5" width="23" height="23" rx="4.5" fill="none" stroke="#2e333d" stroke-width="1"/>
+  <!-- little HDR "scene": sun + horizon, echoing the sample image -->
+  <circle cx="21" cy="11.5" r="3.8" fill="#4c9aff"/>
+  <path d="M5 23 L13 15 L18 20 L23 16 L27 21 L27 27 L5 27 Z" fill="#2b6fd1"/>
+</svg>

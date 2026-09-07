@@ -1,0 +1,19 @@
+# TinyEXR v3 libFuzzer dictionary.
+# Copyright (c) 2014-2026 Syoyo Fujita and TinyEXR authors
+# SPDX-License-Identifier: BSD-3-Clause
+magic="\x76\x2f\x31\x01"
+version2="\x02\x00\x00\x00"
+channels="channels\x00chlist\x00"
+compression="compression\x00compression\x00\x01\x00\x00\x00"
+data_window="dataWindow\x00box2i\x00\x10\x00\x00\x00"
+display_window="displayWindow\x00box2i\x00\x10\x00\x00\x00"
+line_order="lineOrder\x00lineOrder\x00\x01\x00\x00\x00"
+tiles="tiles\x00tiledesc\x00\x09\x00\x00\x00"
+chunk_count="chunkCount\x00int\x00\x04\x00\x00\x00"
+part_name="name\x00string\x00"
+part_type="type\x00string\x00"
+scanline="scanlineimage"
+tiled="tiledimage"
+deep_scanline="deepscanline"
+deep_tile="deeptile"
+max_samples="maxSamplesPerPixel\x00int\x00\x04\x00\x00\x00"

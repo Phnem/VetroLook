@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyEXR texcomp — live texture compression in the browser</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>texcomp <span class="sub">+ tir · texpipe · envmap</span></h1>
+  <p class="tagline">
+    The whole TinyEXR texture pipeline, compiled to WebAssembly and running on
+    your image: <b>resize</b> → <b>compress</b> → <b>decompress</b> → compare.
+    Every codec below is a pure-C11 encoder <i>and</i> a decoder validated
+    against an independent implementation, so what you see is what a GPU samples.
+  </p>
+  <p class="meta" id="meta">loading wasm…</p>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-panel="p-compress" role="tab">Resize &amp; compress</button>
+  <button class="tab" data-panel="p-hdr" role="tab">HDR</button>
+  <button class="tab" data-panel="p-normal" role="tab">Normal maps</button>
+  <button class="tab" data-panel="p-env" role="tab">Cubemap / octahedral</button>
+  <button class="tab" data-panel="p-mips" role="tab">Mip chain</button>
+</nav>
+
+<section class="source">
+  <div class="row">
+    <strong>Source</strong>
+    <button id="btnSample">Bundled sample (EXR)</button>
+    <button id="btnOpenExr">openexr-images…</button>
+    <label class="filebtn">Open file…
+      <input type="file" id="fileIn" accept=".exr,image/*" hidden>
+    </label>
+    <span id="srcInfo" class="dim">—</span>
+  </div>
+  <div id="oexrList" class="oexr hidden"></div>
+  <div id="progress" class="progress hidden"><div id="progressBar"></div></div>
+</section>
+
+<main>
+
+<!-- ------------------------------------------------------- resize+compress -->
+<div class="panel active" id="p-compress">
+  <div class="controls">
+    <label>Size
+      <select id="size">
+        <option value="0" selected>Original (no resize)</option>
+        <option value="128">128</option><option value="256">256</option>
+        <option value="512">512</option><option value="1024">1024</option>
+      </select>
+    </label>
+    <label>Filter
+      <select id="filter">
+        <option value="1">Box</option>
+        <option value="2">Triangle</option>
+        <option value="5" selected>Mitchell</option>
+        <option value="6">Catmull-Rom</option>
+        <option value="8">Lanczos3</option>
+        <option value="9">Kaiser</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="srgbAware" checked> sRGB-aware resize</label>
+    <label>Codec
+      <select id="codec"></select>
+    </label>
+    <label id="astcBlockWrap" class="hidden">ASTC block
+      <select id="astcBlock">
+        <option value="4,4" selected>4×4 (8.0 bpp)</option>
+        <option value="6,6">6×6 (3.56 bpp)</option>
+        <option value="8,8">8×8 (2.0 bpp)</option>
+      </select>
+    </label>
+    <label>Quality
+      <select id="quality">
+        <option value="0">Fast</option>
+        <option value="1" selected>Medium</option>
+        <option value="2">High</option>
+      </select>
+    </label>
+    <button id="btnRun" class="primary">Compress</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="views">
+    <figure><figcaption>Original (resized)</figcaption><canvas id="cA"></canvas></figure>
+    <figure><figcaption>Decompressed</figcaption><canvas id="cB"></canvas></figure>
+    <figure>
+      <figcaption>Error ×<span id="errX">8</span>
+        <input type="range" id="errScale" min="1" max="32" value="8">
+      </figcaption>
+      <canvas id="cC"></canvas>
+    </figure>
+  </div>
+
+  <div class="row">
+    <button id="btnKtx2">Download .ktx2 (mips + container)</button>
+    <button id="btnDds">Download .dds</button>
+    <span id="ktxInfo" class="dim"></span>
+  </div>
+
+  <details class="note">
+    <summary>What am I looking at?</summary>
+    <p>
+      The middle image is the block-compressed texture <em>decoded back</em> —
+      exactly the texels a GPU would sample. The right pane is the amplified
+      absolute error, which is where codecs actually differ: BC1 breaks up in
+      smooth gradients (it has 4 colours per 4×4 block), BC7 and ASTC hold
+      together, and ETC2's planar mode does well on gradients but cannot handle
+      channels that move in opposite directions (it modulates R, G and B by one
+      shared offset).
+    </p>
+    <p>
+      <b>sRGB-aware resize</b> decodes to linear light before filtering. Filtering
+      directly in sRGB darkens what it averages: a black/white checker minifies to
+      ~0.5 sRGB (0.21 linear) instead of 0.5 linear (~0.74 sRGB). Toggle it on a
+      high-contrast image and watch the mid-greys move.
+    </p>
+  </details>
+</div>
+
+<!-- ---------------------------------------------------------------- HDR ---- -->
+<div class="panel" id="p-hdr">
+  <p class="lead">
+    HDR textures cannot go through an 8-bit codec — the values run past 1.0.
+    <b>BC6H</b> and <b>ASTC HDR</b> store half-float endpoints instead, and decode
+    to float. Load a scene-linear EXR (the openexr-images button has plenty) and
+    sweep the exposure: an LDR codec would clip, these do not.
+  </p>
+  <div class="controls">
+    <label>Codec
+      <select id="hdrCodec">
+        <option value="4" selected>BC6H (8 bpp)</option>
+        <option value="10">ASTC HDR 4×4 (8 bpp)</option>
+        <option value="3">BC7 (LDR — for contrast)</option>
+      </select>
+    </label>
+    <label>Exposure <input type="range" id="hdrExp" min="-4" max="4" step="0.25" value="0">
+      <span id="hdrExpV">0.0 EV</span>
+    </label>
+    <button id="btnHdr" class="primary">Compress</button>
+  </div>
+  <div class="stats" id="hdrStats"></div>
+  <div class="views">
+    <figure><figcaption>Original</figcaption><canvas id="hA"></canvas></figure>
+    <figure><figcaption>Decompressed</figcaption><canvas id="hB"></canvas></figure>
+    <figure><figcaption>Error ×16</figcaption><canvas id="hC"></canvas></figure>
+  </div>
+  <details class="note">
+    <summary>Why BC7 looks fine until you raise the exposure</summary>
+    <p>
+      BC7 is an 8-bit codec: everything above 1.0 is clipped at encode time. At
+      0&nbsp;EV that is invisible on many images. Push the exposure up and the
+      highlights that BC6H still holds are simply flat white in BC7 — the data is
+      gone, not merely quantised. That is the whole argument for an HDR codec.
+    </p>
+  </details>
+</div>
+
+<!-- -------------------------------------------------------------- normal --- -->
+<div class="panel" id="p-normal">
+  <p class="lead">
+    Normal maps are the classic case where <b>PSNR lies</b>. What matters is the
+    angle of the reconstructed normal, not the error in the raw channels — a
+    codec can score well on RGB and still light your surface wrong. The demo
+    derives a tangent-space normal map from the image's luminance, compresses it,
+    and reports the <b>mean angular error in degrees</b>.
+  </p>
+  <div class="controls">
+    <label>Bump strength <input type="range" id="nStrength" min="1" max="16" step="1" value="6"></label>
+    <button id="btnNormal" class="primary">Compare codecs</button>
+  </div>
+  <table class="rank" id="nTable"></table>
+  <div class="views">
+    <figure><figcaption>Normal map</figcaption><canvas id="nA"></canvas></figure>
+    <figure><figcaption>Decompressed (selected)</figcaption><canvas id="nB"></canvas></figure>
+    <figure><figcaption>Error ×16</figcaption><canvas id="nC"></canvas></figure>
+  </div>
+  <details class="note">
+    <summary>Why BC5 wins even though it stores fewer channels</summary>
+    <p>
+      BC5 keeps only X and Y, each with its own endpoints, and the shader
+      rebuilds Z = √(1 − x² − y²). BC7 spends bits on a blue channel that carries
+      no information and shares endpoints across channels, so it is usually
+      <em>worse</em> on normals despite being the "better" codec — a result you
+      can reproduce right here. EAC_RG11 is the mobile equivalent of BC5.
+    </p>
+  </details>
+</div>
+
+<!-- ----------------------------------------------------------------- env --- -->
+<div class="panel" id="p-env">
+  <p class="lead">
+    Environment maps for IBL. Load an equirectangular (latlong) EXR and reproject
+    it to a <b>cubemap</b> (6 faces) or an <b>octahedral</b> map, then compress the
+    result with BC6H. Octahedral packing wastes no texels on the seams a cube has,
+    which is why it keeps showing up in modern renderers.
+  </p>
+  <div class="controls">
+    <label>Projection
+      <select id="envProj">
+        <option value="1" selected>Cubemap (6 faces)</option>
+        <option value="2">Octahedral</option>
+      </select>
+    </label>
+    <label>Size
+      <select id="envSize">
+        <option>64</option><option selected>128</option><option>256</option>
+      </select>
+    </label>
+    <label>Codec
+      <select id="envCodec">
+        <option value="4" selected>BC6H (HDR)</option>
+        <option value="10">ASTC HDR 4×4</option>
+      </select>
+    </label>
+    <label>Exposure <input type="range" id="envExp" min="-4" max="4" step="0.25" value="0"></label>
+    <button id="btnEnv" class="primary">Project &amp; compress</button>
+  </div>
+  <div class="stats" id="envStats"></div>
+  <div class="views">
+    <figure><figcaption>Projected</figcaption><canvas id="eA"></canvas></figure>
+    <figure><figcaption>Decompressed</figcaption><canvas id="eB"></canvas></figure>
+    <figure><figcaption>Error ×16</figcaption><canvas id="eC"></canvas></figure>
+  </div>
+  <p class="dim">
+    The cubemap is drawn as a vertical strip: +X, −X, +Y, −Y, +Z, −Z. texpipe
+    also does seam-free cubemap LOD (filtering across face borders so the mips do
+    not crack at the edges) — see the docs.
+  </p>
+</div>
+
+<!-- ---------------------------------------------------------------- mips --- -->
+<div class="panel" id="p-mips">
+  <p class="lead">
+    texpipe builds the mip chain from the base image at every level (not by
+    repeatedly halving the previous mip, which compounds filter error), and can
+    apply content-aware passes per level.
+  </p>
+  <div class="controls">
+    <label>Content
+      <select id="mipContent">
+        <option value="0" selected>Colour</option>
+        <option value="1">Alpha-tested (preserve coverage)</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="mipSrgb" checked> sRGB-aware</label>
+    <button id="btnMips" class="primary">Build chain</button>
+  </div>
+  <div id="mipStrip" class="mipstrip"></div>
+  <details class="note">
+    <summary>Alpha-coverage preservation</summary>
+    <p>
+      Minifying an alpha-tested texture (foliage, chain-link) thins it out: fewer
+      texels survive the alpha test at each level, and the leaves visibly
+      evaporate in the distance. texpipe rescales alpha per level so the fraction
+      of texels passing the test stays put (Castaño's method).
+    </p>
+  </details>
+</div>
+
+</main>
+
+<footer>
+  <p>
+    <a href="https://github.com/syoyo/tinyexr" target="_blank" rel="noopener">TinyEXR</a>
+    · <a href="https://github.com/syoyo/tinyexr/blob/release/doc/texcomp.md" target="_blank" rel="noopener">texcomp docs</a>
+    · sample images from
+    <a href="https://github.com/AcademySoftwareFoundation/openexr-images" target="_blank" rel="noopener">openexr-images</a>
+    (ASWF)
+  </p>
+  <p class="dim">
+    Everything runs locally in your browser. No image is uploaded anywhere.
+  </p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

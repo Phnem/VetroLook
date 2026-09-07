@@ -1,0 +1,6 @@
+// Vetro Look, GPL-3.0-or-later.
+// Application icon, embedded into the executable so the same artwork shows
+// up on the .exe itself, in the taskbar/tray, and — via DefaultIcon pointing
+// at this exe — on any file type Vetro Look is registered to open.
+#define IDI_APP_ICON 1
+IDI_APP_ICON ICON "app.ico"

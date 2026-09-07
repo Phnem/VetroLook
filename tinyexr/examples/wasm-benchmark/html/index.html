@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TinyEXR V3 WASM Benchmark</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>TinyEXR V3 WASM Performance Benchmark</h1>
+
+        <div id="controls">
+            <div class="control-group">
+                <label for="imageSize">Image Size:</label>
+                <select id="imageSize">
+                    <option value="512,512">512x512</option>
+                    <option value="1920,1080" selected>1920x1080</option>
+                    <option value="4096,4096">4096x4096</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="iterations">Iterations:</label>
+                <input type="number" id="iterations" value="5" min="1" max="20">
+            </div>
+
+            <div class="button-group">
+                <button id="runBtn" disabled>Run Selected Size</button>
+                <button id="runAllBtn" disabled>Run All Sizes</button>
+                <button id="clearBtn">Clear Results</button>
+            </div>
+        </div>
+
+        <div id="status">Loading WASM module...</div>
+        <div id="memory-info"></div>
+
+        <div id="progress-container" style="display: none;">
+            <div id="progress-bar"></div>
+            <div id="progress-text"></div>
+        </div>
+
+        <h2>Results</h2>
+        <table id="results-table">
+            <thead>
+                <tr>
+                    <th>Size</th>
+                    <th>Compression</th>
+                    <th>Encoded Size</th>
+                    <th>Ratio</th>
+                    <th>Encode (ms)</th>
+                    <th>Decode (ms)</th>
+                    <th>Encode MB/s</th>
+                    <th>Decode MB/s</th>
+                </tr>
+            </thead>
+            <tbody id="results-body">
+                <tr><td colspan="8" class="no-results">Run a benchmark to see results</td></tr>
+            </tbody>
+        </table>
+
+        <div class="export-controls">
+            <button id="exportBtn" disabled>Export JSON</button>
+            <button id="exportCSVBtn" disabled>Export CSV</button>
+        </div>
+    </div>
+
+    <script type="module" src="../js/benchmark-browser.js"></script>
+</body>
+</html>

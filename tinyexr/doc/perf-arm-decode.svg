@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="760" height="400" fill="#fff"/>
+<text x="60" y="26" font-size="17" font-weight="700" fill="#111">Decode throughput - Apple M1 (higher is better)</text>
+<text x="60" y="44" font-size="12" fill="#666">Apple M1, asakusa.exr 660x440, in-memory, single thread; NEON auto-dispatch.</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#eee"/>
+<text x="52" y="332.0" font-size="11" fill="#888" text-anchor="end">0</text>
+<line x1="60" y1="275.2" x2="742" y2="275.2" stroke="#eee"/>
+<text x="52" y="279.2" font-size="11" fill="#888" text-anchor="end">70</text>
+<line x1="60" y1="222.4" x2="742" y2="222.4" stroke="#eee"/>
+<text x="52" y="226.4" font-size="11" fill="#888" text-anchor="end">140</text>
+<line x1="60" y1="169.6" x2="742" y2="169.6" stroke="#eee"/>
+<text x="52" y="173.6" font-size="11" fill="#888" text-anchor="end">210</text>
+<line x1="60" y1="116.8" x2="742" y2="116.8" stroke="#eee"/>
+<text x="52" y="120.8" font-size="11" fill="#888" text-anchor="end">280</text>
+<line x1="60" y1="64.0" x2="742" y2="64.0" stroke="#eee"/>
+<text x="52" y="68.0" font-size="11" fill="#888" text-anchor="end">350</text>
+<text x="16" y="196" font-size="12" fill="#666" transform="rotate(-90 16 196)" text-anchor="middle">megapixels / s</text>
+<rect x="69.4" y="208.1" width="22.2" height="119.9" fill="#2563eb" rx="2"/>
+<text x="80.5" y="204.1" font-size="9" fill="#444" text-anchor="middle">159</text>
+<rect x="91.5" y="208.1" width="22.2" height="119.9" fill="#7c3aed" rx="2"/>
+<text x="102.6" y="204.1" font-size="9" fill="#444" text-anchor="middle">159</text>
+<rect x="113.7" y="263.9" width="22.2" height="64.1" fill="#f59e0b" rx="2"/>
+<text x="124.8" y="259.9" font-size="9" fill="#444" text-anchor="middle">85</text>
+<text x="102.6" y="346" font-size="12" fill="#333" text-anchor="middle">rle</text>
+<rect x="154.6" y="285.8" width="22.2" height="42.2" fill="#2563eb" rx="2"/>
+<text x="165.7" y="281.8" font-size="9" fill="#444" text-anchor="middle">56</text>
+<rect x="176.8" y="285.8" width="22.2" height="42.2" fill="#7c3aed" rx="2"/>
+<text x="187.9" y="281.8" font-size="9" fill="#444" text-anchor="middle">56</text>
+<rect x="199.0" y="282.7" width="22.2" height="45.3" fill="#f59e0b" rx="2"/>
+<text x="210.0" y="278.7" font-size="9" fill="#444" text-anchor="middle">60</text>
+<text x="187.9" y="346" font-size="12" fill="#333" text-anchor="middle">zips</text>
+<rect x="239.9" y="274.4" width="22.2" height="53.6" fill="#2563eb" rx="2"/>
+<text x="251.0" y="270.4" font-size="9" fill="#444" text-anchor="middle">71</text>
+<rect x="262.0" y="274.4" width="22.2" height="53.6" fill="#7c3aed" rx="2"/>
+<text x="273.1" y="270.4" font-size="9" fill="#444" text-anchor="middle">71</text>
+<rect x="284.2" y="269.2" width="22.2" height="58.8" fill="#f59e0b" rx="2"/>
+<text x="295.3" y="265.2" font-size="9" fill="#444" text-anchor="middle">78</text>
+<text x="273.1" y="346" font-size="12" fill="#333" text-anchor="middle">zip</text>
+<rect x="325.1" y="276.7" width="22.2" height="51.3" fill="#2563eb" rx="2"/>
+<text x="336.2" y="272.7" font-size="9" fill="#444" text-anchor="middle">68</text>
+<rect x="347.3" y="276.7" width="22.2" height="51.3" fill="#7c3aed" rx="2"/>
+<text x="358.4" y="272.7" font-size="9" fill="#444" text-anchor="middle">68</text>
+<rect x="369.5" y="279.7" width="22.2" height="48.3" fill="#f59e0b" rx="2"/>
+<text x="380.5" y="275.7" font-size="9" fill="#444" text-anchor="middle">64</text>
+<text x="358.4" y="346" font-size="12" fill="#333" text-anchor="middle">piz</text>
+<rect x="410.4" y="266.1" width="22.2" height="61.9" fill="#2563eb" rx="2"/>
+<text x="421.5" y="262.1" font-size="9" fill="#444" text-anchor="middle">82</text>
+<rect x="432.5" y="266.1" width="22.2" height="61.9" fill="#7c3aed" rx="2"/>
+<text x="443.6" y="262.1" font-size="9" fill="#444" text-anchor="middle">82</text>
+<rect x="454.7" y="266.9" width="22.2" height="61.1" fill="#f59e0b" rx="2"/>
+<text x="465.8" y="262.9" font-size="9" fill="#444" text-anchor="middle">81</text>
+<text x="443.6" y="346" font-size="12" fill="#333" text-anchor="middle">pxr24</text>
+<rect x="495.6" y="94.2" width="22.2" height="233.8" fill="#2563eb" rx="2"/>
+<text x="506.7" y="90.2" font-size="9" fill="#444" text-anchor="middle">310</text>
+<rect x="517.8" y="94.2" width="22.2" height="233.8" fill="#7c3aed" rx="2"/>
+<text x="528.9" y="90.2" font-size="9" fill="#444" text-anchor="middle">310</text>
+<rect x="540.0" y="167.3" width="22.2" height="160.7" fill="#f59e0b" rx="2"/>
+<text x="551.0" y="163.3" font-size="9" fill="#444" text-anchor="middle">213</text>
+<text x="528.9" y="346" font-size="12" fill="#333" text-anchor="middle">b44</text>
+<rect x="580.9" y="301.1" width="22.2" height="26.9" fill="#2563eb" rx="2"/>
+<text x="592.0" y="297.1" font-size="9" fill="#444" text-anchor="middle">35.7</text>
+<rect x="603.0" y="299.6" width="22.2" height="28.4" fill="#7c3aed" rx="2"/>
+<text x="614.1" y="295.6" font-size="9" fill="#444" text-anchor="middle">37.6</text>
+<rect x="625.2" y="298.8" width="22.2" height="29.2" fill="#f59e0b" rx="2"/>
+<text x="636.3" y="294.8" font-size="9" fill="#444" text-anchor="middle">38.7</text>
+<text x="614.1" y="346" font-size="12" fill="#333" text-anchor="middle">htj2k256</text>
+<rect x="666.1" y="301.1" width="22.2" height="26.9" fill="#2563eb" rx="2"/>
+<text x="677.2" y="297.1" font-size="9" fill="#444" text-anchor="middle">35.7</text>
+<rect x="688.3" y="299.6" width="22.2" height="28.4" fill="#7c3aed" rx="2"/>
+<text x="699.4" y="295.6" font-size="9" fill="#444" text-anchor="middle">37.7</text>
+<rect x="710.5" y="299.7" width="22.2" height="28.3" fill="#f59e0b" rx="2"/>
+<text x="721.5" y="295.7" font-size="9" fill="#444" text-anchor="middle">37.5</text>
+<text x="699.4" y="346" font-size="12" fill="#333" text-anchor="middle">htj2k32</text>
+<line x1="60" y1="328.0" x2="742" y2="328.0" stroke="#bbb"/>
+<rect x="60" y="370" width="12" height="12" fill="#2563eb" rx="2"/>
+<text x="77" y="380" font-size="12" fill="#333">tinyexr (portable)</text>
+<rect x="210" y="370" width="12" height="12" fill="#7c3aed" rx="2"/>
+<text x="227" y="380" font-size="12" fill="#333">tinyexr (M1 tuned)</text>
+<rect x="360" y="370" width="12" height="12" fill="#f59e0b" rx="2"/>
+<text x="377" y="380" font-size="12" fill="#333">OpenEXR/OpenJPH</text>
+</svg>

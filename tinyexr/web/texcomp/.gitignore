@@ -1,0 +1,4 @@
+# built by build.sh; committed so the demo can be served straight from the repo
+# (mirrors web/viewer). Uncomment to keep them out of git instead.
+#texcomp_web.mjs
+#texcomp_web.wasm

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1520" height="800" viewBox="0 0 1520 800" font-family="-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="1520" height="800" fill="#fff"/>
+<text x="120" y="52" font-size="34" font-weight="700" fill="#111">Decode throughput - libdeflate on/off vs OpenEXR (single thread)</text>
+<text x="120" y="88" font-size="24" fill="#666">AMD Ryzen 9 3950X (Zen2), asakusa.exr 660x440, in-memory. Higher is better.</text>
+<line x1="120" y1="656.0" x2="1460" y2="656.0" stroke="#eee"/>
+<text x="104" y="664.0" font-size="22" fill="#888" text-anchor="end">0</text>
+<line x1="120" y1="550.4" x2="1460" y2="550.4" stroke="#eee"/>
+<text x="104" y="558.4" font-size="22" fill="#888" text-anchor="end">18</text>
+<line x1="120" y1="444.8" x2="1460" y2="444.8" stroke="#eee"/>
+<text x="104" y="452.8" font-size="22" fill="#888" text-anchor="end">36</text>
+<line x1="120" y1="339.2" x2="1460" y2="339.2" stroke="#eee"/>
+<text x="104" y="347.2" font-size="22" fill="#888" text-anchor="end">54</text>
+<line x1="120" y1="233.6" x2="1460" y2="233.6" stroke="#eee"/>
+<text x="104" y="241.6" font-size="22" fill="#888" text-anchor="end">72</text>
+<line x1="120" y1="128.0" x2="1460" y2="128.0" stroke="#eee"/>
+<text x="104" y="136.0" font-size="22" fill="#888" text-anchor="end">90</text>
+<text x="32" y="392" font-size="24" fill="#666" transform="rotate(-90 32 392)" text-anchor="middle">megapixels / s</text>
+<rect x="149.5" y="467.1" width="69.7" height="188.9" fill="#2563eb" rx="4"/>
+<text x="184.3" y="459.1" font-size="18" fill="#444" text-anchor="middle">32.2</text>
+<rect x="219.2" y="407.3" width="69.7" height="248.7" fill="#16a34a" rx="4"/>
+<text x="254.0" y="399.3" font-size="18" fill="#444" text-anchor="middle">42.4</text>
+<rect x="288.8" y="475.9" width="69.7" height="180.1" fill="#f59e0b" rx="4"/>
+<text x="323.7" y="467.9" font-size="18" fill="#444" text-anchor="middle">30.7</text>
+<text x="254.0" y="692" font-size="24" fill="#333" text-anchor="middle">zip</text>
+<rect x="417.5" y="556.3" width="69.7" height="99.7" fill="#2563eb" rx="4"/>
+<text x="452.3" y="548.3" font-size="18" fill="#444" text-anchor="middle">17</text>
+<rect x="487.2" y="469.4" width="69.7" height="186.6" fill="#16a34a" rx="4"/>
+<text x="522.0" y="461.4" font-size="18" fill="#444" text-anchor="middle">31.8</text>
+<rect x="556.8" y="512.9" width="69.7" height="143.1" fill="#f59e0b" rx="4"/>
+<text x="591.7" y="504.9" font-size="18" fill="#444" text-anchor="middle">24.4</text>
+<text x="522.0" y="692" font-size="24" fill="#333" text-anchor="middle">zips</text>
+<rect x="685.5" y="480.6" width="69.7" height="175.4" fill="#2563eb" rx="4"/>
+<text x="720.3" y="472.6" font-size="18" fill="#444" text-anchor="middle">29.9</text>
+<rect x="755.2" y="399.6" width="69.7" height="256.4" fill="#16a34a" rx="4"/>
+<text x="790.0" y="391.6" font-size="18" fill="#444" text-anchor="middle">43.7</text>
+<rect x="824.8" y="399.0" width="69.7" height="257.0" fill="#f59e0b" rx="4"/>
+<text x="859.7" y="391.0" font-size="18" fill="#444" text-anchor="middle">43.8</text>
+<text x="790.0" y="692" font-size="24" fill="#333" text-anchor="middle">pxr24</text>
+<rect x="953.5" y="519.9" width="69.7" height="136.1" fill="#2563eb" rx="4"/>
+<text x="988.3" y="511.9" font-size="18" fill="#444" text-anchor="middle">23.2</text>
+<rect x="1023.2" y="514.6" width="69.7" height="141.4" fill="#16a34a" rx="4"/>
+<text x="1058.0" y="506.6" font-size="18" fill="#444" text-anchor="middle">24.1</text>
+<rect x="1092.8" y="481.2" width="69.7" height="174.8" fill="#f59e0b" rx="4"/>
+<text x="1127.7" y="473.2" font-size="18" fill="#444" text-anchor="middle">29.8</text>
+<text x="1058.0" y="692" font-size="24" fill="#333" text-anchor="middle">htj2k256</text>
+<rect x="1221.5" y="518.1" width="69.7" height="137.9" fill="#2563eb" rx="4"/>
+<text x="1256.3" y="510.1" font-size="18" fill="#444" text-anchor="middle">23.5</text>
+<rect x="1291.2" y="518.1" width="69.7" height="137.9" fill="#16a34a" rx="4"/>
+<text x="1326.0" y="510.1" font-size="18" fill="#444" text-anchor="middle">23.5</text>
+<rect x="1360.8" y="492.3" width="69.7" height="163.7" fill="#f59e0b" rx="4"/>
+<text x="1395.7" y="484.3" font-size="18" fill="#444" text-anchor="middle">27.9</text>
+<text x="1326.0" y="692" font-size="24" fill="#333" text-anchor="middle">htj2k32</text>
+<line x1="120" y1="656.0" x2="1460" y2="656.0" stroke="#bbb"/>
+<rect x="120" y="740" width="24" height="24" fill="#2563eb" rx="4"/>
+<text x="154" y="760" font-size="24" fill="#333">tinyexr (in-tree)</text>
+<rect x="406" y="740" width="24" height="24" fill="#16a34a" rx="4"/>
+<text x="440" y="760" font-size="24" fill="#333">tinyexr (libdeflate)</text>
+<rect x="734" y="740" width="24" height="24" fill="#f59e0b" rx="4"/>
+<text x="768" y="760" font-size="24" fill="#333">OpenEXR</text>
+</svg>

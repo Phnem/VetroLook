@@ -1,0 +1,16 @@
+# Build output
+dist/
+*.o
+*.wasm
+*.wasm.map
+
+# Node modules (if any)
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

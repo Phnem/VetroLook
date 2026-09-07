@@ -1,0 +1,498 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// A simplified and optimized version of decoder.inverse_dct_full when the AC
+// coefficients are all zero.
+pri func decoder.inverse_dct_dc_only!(
+        cachex: base.u32[..= 28],
+        cachey: base.u32[..= 22],
+        b: base.u32[..= 23]) {
+    var dc : base.u16
+    var i  : base.u32
+
+    dc = this.util.sign_extend_rshift_u16(a: this.mb_coeffs[args.b][0] ~mod+ 4, n: 3)
+
+    i = 0
+    while i < 16 {
+        this.yuv_cache[args.cachey + (i >> 2)][args.cachex + (i & 3)] = CLAMP[1023 & (dc ~mod+
+                (this.yuv_cache[args.cachey + (i >> 2)][args.cachex + (i & 3)] as base.u16))]
+        i += 1
+    }
+}
+
+// RFC 6386 Section 14.4. Implementation of the DCT Inversion.
+//
+// It reads from mb_coeffs and yuv_cache and writes to yuv_cache.
+pri func decoder.inverse_dct_full!(
+        cachex: base.u32[..= 28],
+        cachey: base.u32[..= 22],
+        b: base.u32[..= 23]) {
+    var a00 : base.u32
+    var a01 : base.u32
+    var a02 : base.u32
+    var a03 : base.u32
+    var a10 : base.u32
+    var a11 : base.u32
+    var a12 : base.u32
+    var a13 : base.u32
+    var a20 : base.u32
+    var a21 : base.u32
+    var a22 : base.u32
+    var a23 : base.u32
+    var a30 : base.u32
+    var a31 : base.u32
+    var a32 : base.u32
+    var a33 : base.u32
+
+    var b00 : base.u32
+    var b01 : base.u32
+    var b02 : base.u32
+    var b03 : base.u32
+    var b10 : base.u32
+    var b11 : base.u32
+    var b12 : base.u32
+    var b13 : base.u32
+    var b20 : base.u32
+    var b21 : base.u32
+    var b22 : base.u32
+    var b23 : base.u32
+    var b30 : base.u32
+    var b31 : base.u32
+    var b32 : base.u32
+    var b33 : base.u32
+
+    var m00 : base.u32
+    var m01 : base.u32
+    var m02 : base.u32
+    var m03 : base.u32
+    var m10 : base.u32
+    var m11 : base.u32
+    var m12 : base.u32
+    var m13 : base.u32
+    var m20 : base.u32
+    var m21 : base.u32
+    var m22 : base.u32
+    var m23 : base.u32
+    var m30 : base.u32
+    var m31 : base.u32
+    var m32 : base.u32
+    var m33 : base.u32
+
+    var dc0 : base.u32
+    var dc1 : base.u32
+    var dc2 : base.u32
+    var dc3 : base.u32
+
+    var p00 : base.u32
+    var p01 : base.u32
+    var p02 : base.u32
+    var p03 : base.u32
+    var p10 : base.u32
+    var p11 : base.u32
+    var p12 : base.u32
+    var p13 : base.u32
+    var p20 : base.u32
+    var p21 : base.u32
+    var p22 : base.u32
+    var p23 : base.u32
+    var p30 : base.u32
+    var p31 : base.u32
+    var p32 : base.u32
+    var p33 : base.u32
+
+    var q00 : base.u32
+    var q01 : base.u32
+    var q02 : base.u32
+    var q03 : base.u32
+    var q10 : base.u32
+    var q11 : base.u32
+    var q12 : base.u32
+    var q13 : base.u32
+    var q20 : base.u32
+    var q21 : base.u32
+    var q22 : base.u32
+    var q23 : base.u32
+    var q30 : base.u32
+    var q31 : base.u32
+    var q32 : base.u32
+    var q33 : base.u32
+
+    // 35468 is approximately 65536 * sin(pi/8) * sqrt(2).
+    //
+    // 85627 is approximately 65536 * cos(pi/8) * sqrt(2). Compared to the RFC
+    // implementation 85627 is also (20091 + 65536).
+
+    // --------
+
+    a00 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x0])
+    a01 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x4])
+    a02 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x8])
+    a03 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xC])
+
+    b00 = a00 ~mod+ a02
+    b01 = a00 ~mod- a02
+    b02 = this.util.sign_extend_rshift_u32(a: a01 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: a03 ~mod* 85627, n: 16)
+    b03 = this.util.sign_extend_rshift_u32(a: a01 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: a03 ~mod* 35468, n: 16)
+
+    m00 = b00 ~mod+ b03
+    m01 = b01 ~mod+ b02
+    m02 = b01 ~mod- b02
+    m03 = b00 ~mod- b03
+
+    // ----
+
+    a10 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x1])
+    a11 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x5])
+    a12 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x9])
+    a13 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xD])
+
+    b10 = a10 ~mod+ a12
+    b11 = a10 ~mod- a12
+    b12 = this.util.sign_extend_rshift_u32(a: a11 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: a13 ~mod* 85627, n: 16)
+    b13 = this.util.sign_extend_rshift_u32(a: a11 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: a13 ~mod* 35468, n: 16)
+
+    m10 = b10 ~mod+ b13
+    m11 = b11 ~mod+ b12
+    m12 = b11 ~mod- b12
+    m13 = b10 ~mod- b13
+
+    // ----
+
+    a20 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x2])
+    a21 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x6])
+    a22 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xA])
+    a23 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xE])
+
+    b20 = a20 ~mod+ a22
+    b21 = a20 ~mod- a22
+    b22 = this.util.sign_extend_rshift_u32(a: a21 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: a23 ~mod* 85627, n: 16)
+    b23 = this.util.sign_extend_rshift_u32(a: a21 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: a23 ~mod* 35468, n: 16)
+
+    m20 = b20 ~mod+ b23
+    m21 = b21 ~mod+ b22
+    m22 = b21 ~mod- b22
+    m23 = b20 ~mod- b23
+
+    // ----
+
+    a30 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x3])
+    a31 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0x7])
+    a32 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xB])
+    a33 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[args.b][0xF])
+
+    b30 = a30 ~mod+ a32
+    b31 = a30 ~mod- a32
+    b32 = this.util.sign_extend_rshift_u32(a: a31 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: a33 ~mod* 85627, n: 16)
+    b33 = this.util.sign_extend_rshift_u32(a: a31 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: a33 ~mod* 35468, n: 16)
+
+    m30 = b30 ~mod+ b33
+    m31 = b31 ~mod+ b32
+    m32 = b31 ~mod- b32
+    m33 = b30 ~mod- b33
+
+    // --------
+
+    dc0 = m00 ~mod+ 4
+
+    p00 = dc0 ~mod+ m20
+    p01 = dc0 ~mod- m20
+    p02 = this.util.sign_extend_rshift_u32(a: m10 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: m30 ~mod* 85627, n: 16)
+    p03 = this.util.sign_extend_rshift_u32(a: m10 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: m30 ~mod* 35468, n: 16)
+
+    q00 = this.util.sign_extend_rshift_u32(a: p00 ~mod+ p03, n: 3)
+    q01 = this.util.sign_extend_rshift_u32(a: p01 ~mod+ p02, n: 3)
+    q02 = this.util.sign_extend_rshift_u32(a: p01 ~mod- p02, n: 3)
+    q03 = this.util.sign_extend_rshift_u32(a: p00 ~mod- p03, n: 3)
+
+    this.yuv_cache[args.cachey + 0][args.cachex + 0] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 0][args.cachex + 0] as base.u32) ~mod+ q00)]
+    this.yuv_cache[args.cachey + 0][args.cachex + 1] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 0][args.cachex + 1] as base.u32) ~mod+ q01)]
+    this.yuv_cache[args.cachey + 0][args.cachex + 2] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 0][args.cachex + 2] as base.u32) ~mod+ q02)]
+    this.yuv_cache[args.cachey + 0][args.cachex + 3] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 0][args.cachex + 3] as base.u32) ~mod+ q03)]
+
+    // ----
+
+    dc1 = m01 ~mod+ 4
+
+    p10 = dc1 ~mod+ m21
+    p11 = dc1 ~mod- m21
+    p12 = this.util.sign_extend_rshift_u32(a: m11 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: m31 ~mod* 85627, n: 16)
+    p13 = this.util.sign_extend_rshift_u32(a: m11 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: m31 ~mod* 35468, n: 16)
+
+    q10 = this.util.sign_extend_rshift_u32(a: p10 ~mod+ p13, n: 3)
+    q11 = this.util.sign_extend_rshift_u32(a: p11 ~mod+ p12, n: 3)
+    q12 = this.util.sign_extend_rshift_u32(a: p11 ~mod- p12, n: 3)
+    q13 = this.util.sign_extend_rshift_u32(a: p10 ~mod- p13, n: 3)
+
+    this.yuv_cache[args.cachey + 1][args.cachex + 0] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 1][args.cachex + 0] as base.u32) ~mod+ q10)]
+    this.yuv_cache[args.cachey + 1][args.cachex + 1] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 1][args.cachex + 1] as base.u32) ~mod+ q11)]
+    this.yuv_cache[args.cachey + 1][args.cachex + 2] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 1][args.cachex + 2] as base.u32) ~mod+ q12)]
+    this.yuv_cache[args.cachey + 1][args.cachex + 3] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 1][args.cachex + 3] as base.u32) ~mod+ q13)]
+
+    // ----
+
+    dc2 = m02 ~mod+ 4
+
+    p20 = dc2 ~mod+ m22
+    p21 = dc2 ~mod- m22
+    p22 = this.util.sign_extend_rshift_u32(a: m12 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: m32 ~mod* 85627, n: 16)
+    p23 = this.util.sign_extend_rshift_u32(a: m12 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: m32 ~mod* 35468, n: 16)
+
+    q20 = this.util.sign_extend_rshift_u32(a: p20 ~mod+ p23, n: 3)
+    q21 = this.util.sign_extend_rshift_u32(a: p21 ~mod+ p22, n: 3)
+    q22 = this.util.sign_extend_rshift_u32(a: p21 ~mod- p22, n: 3)
+    q23 = this.util.sign_extend_rshift_u32(a: p20 ~mod- p23, n: 3)
+
+    this.yuv_cache[args.cachey + 2][args.cachex + 0] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 2][args.cachex + 0] as base.u32) ~mod+ q20)]
+    this.yuv_cache[args.cachey + 2][args.cachex + 1] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 2][args.cachex + 1] as base.u32) ~mod+ q21)]
+    this.yuv_cache[args.cachey + 2][args.cachex + 2] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 2][args.cachex + 2] as base.u32) ~mod+ q22)]
+    this.yuv_cache[args.cachey + 2][args.cachex + 3] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 2][args.cachex + 3] as base.u32) ~mod+ q23)]
+
+    // ----
+
+    dc3 = m03 ~mod+ 4
+
+    p30 = dc3 ~mod+ m23
+    p31 = dc3 ~mod- m23
+    p32 = this.util.sign_extend_rshift_u32(a: m13 ~mod* 35468, n: 16) ~mod-
+            this.util.sign_extend_rshift_u32(a: m33 ~mod* 85627, n: 16)
+    p33 = this.util.sign_extend_rshift_u32(a: m13 ~mod* 85627, n: 16) ~mod+
+            this.util.sign_extend_rshift_u32(a: m33 ~mod* 35468, n: 16)
+
+    q30 = this.util.sign_extend_rshift_u32(a: p30 ~mod+ p33, n: 3)
+    q31 = this.util.sign_extend_rshift_u32(a: p31 ~mod+ p32, n: 3)
+    q32 = this.util.sign_extend_rshift_u32(a: p31 ~mod- p32, n: 3)
+    q33 = this.util.sign_extend_rshift_u32(a: p30 ~mod- p33, n: 3)
+
+    this.yuv_cache[args.cachey + 3][args.cachex + 0] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 3][args.cachex + 0] as base.u32) ~mod+ q30)]
+    this.yuv_cache[args.cachey + 3][args.cachex + 1] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 3][args.cachex + 1] as base.u32) ~mod+ q31)]
+    this.yuv_cache[args.cachey + 3][args.cachex + 2] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 3][args.cachex + 2] as base.u32) ~mod+ q32)]
+    this.yuv_cache[args.cachey + 3][args.cachex + 3] = CLAMP[1023 & ((
+            this.yuv_cache[args.cachey + 3][args.cachex + 3] as base.u32) ~mod+ q33)]
+}
+
+// RFC 6386 Section 14.3. Implementation of the WHT Inversion.
+//
+// It reads from and writes to mb_coeffs.
+pri func decoder.inverse_wht!() {
+    var a00 : base.u32
+    var a01 : base.u32
+    var a02 : base.u32
+    var a03 : base.u32
+    var a10 : base.u32
+    var a11 : base.u32
+    var a12 : base.u32
+    var a13 : base.u32
+    var a20 : base.u32
+    var a21 : base.u32
+    var a22 : base.u32
+    var a23 : base.u32
+    var a30 : base.u32
+    var a31 : base.u32
+    var a32 : base.u32
+    var a33 : base.u32
+
+    var b00 : base.u32
+    var b01 : base.u32
+    var b02 : base.u32
+    var b03 : base.u32
+    var b10 : base.u32
+    var b11 : base.u32
+    var b12 : base.u32
+    var b13 : base.u32
+    var b20 : base.u32
+    var b21 : base.u32
+    var b22 : base.u32
+    var b23 : base.u32
+    var b30 : base.u32
+    var b31 : base.u32
+    var b32 : base.u32
+    var b33 : base.u32
+
+    var m00 : base.u32
+    var m01 : base.u32
+    var m02 : base.u32
+    var m03 : base.u32
+    var m10 : base.u32
+    var m11 : base.u32
+    var m12 : base.u32
+    var m13 : base.u32
+    var m20 : base.u32
+    var m21 : base.u32
+    var m22 : base.u32
+    var m23 : base.u32
+    var m30 : base.u32
+    var m31 : base.u32
+    var m32 : base.u32
+    var m33 : base.u32
+
+    var p00 : base.u32
+    var p01 : base.u32
+    var p02 : base.u32
+    var p03 : base.u32
+    var p10 : base.u32
+    var p11 : base.u32
+    var p12 : base.u32
+    var p13 : base.u32
+    var p20 : base.u32
+    var p21 : base.u32
+    var p22 : base.u32
+    var p23 : base.u32
+    var p30 : base.u32
+    var p31 : base.u32
+    var p32 : base.u32
+    var p33 : base.u32
+
+    // --------
+
+    a00 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x0])
+    a01 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x4])
+    a02 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x8])
+    a03 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xC])
+
+    b00 = a00 ~mod+ a03
+    b01 = a01 ~mod+ a02
+    b02 = a01 ~mod- a02
+    b03 = a00 ~mod- a03
+
+    m00 = b00 ~mod+ b01
+    m01 = b03 ~mod+ b02
+    m02 = b00 ~mod- b01
+    m03 = b03 ~mod- b02
+
+    // ----
+
+    a10 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x1])
+    a11 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x5])
+    a12 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x9])
+    a13 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xD])
+
+    b10 = a10 ~mod+ a13
+    b11 = a11 ~mod+ a12
+    b12 = a11 ~mod- a12
+    b13 = a10 ~mod- a13
+
+    m10 = b10 ~mod+ b11
+    m11 = b13 ~mod+ b12
+    m12 = b10 ~mod- b11
+    m13 = b13 ~mod- b12
+
+    // ----
+
+    a20 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x2])
+    a21 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x6])
+    a22 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xA])
+    a23 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xE])
+
+    b20 = a20 ~mod+ a23
+    b21 = a21 ~mod+ a22
+    b22 = a21 ~mod- a22
+    b23 = a20 ~mod- a23
+
+    m20 = b20 ~mod+ b21
+    m21 = b23 ~mod+ b22
+    m22 = b20 ~mod- b21
+    m23 = b23 ~mod- b22
+
+    // ----
+
+    a30 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x3])
+    a31 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0x7])
+    a32 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xB])
+    a33 = this.util.sign_extend_convert_u16_u32(a: this.mb_coeffs[24][0xF])
+
+    b30 = a30 ~mod+ a33
+    b31 = a31 ~mod+ a32
+    b32 = a31 ~mod- a32
+    b33 = a30 ~mod- a33
+
+    m30 = b30 ~mod+ b31
+    m31 = b33 ~mod+ b32
+    m32 = b30 ~mod- b31
+    m33 = b33 ~mod- b32
+
+    // --------
+
+    p00 = (m00 ~mod+ m30) ~mod+ 3
+    p01 = (m10 ~mod+ m20)
+    p02 = (m10 ~mod- m20)
+    p03 = (m00 ~mod- m30) ~mod+ 3
+
+    this.mb_coeffs[0x0][0] = (this.util.sign_extend_rshift_u32(a: p00 ~mod+ p01, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x1][0] = (this.util.sign_extend_rshift_u32(a: p03 ~mod+ p02, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x2][0] = (this.util.sign_extend_rshift_u32(a: p00 ~mod- p01, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x3][0] = (this.util.sign_extend_rshift_u32(a: p03 ~mod- p02, n: 3) & 0xFFFF) as base.u16
+
+    // ----
+
+    p10 = (m01 ~mod+ m31) ~mod+ 3
+    p11 = (m11 ~mod+ m21)
+    p12 = (m11 ~mod- m21)
+    p13 = (m01 ~mod- m31) ~mod+ 3
+
+    this.mb_coeffs[0x4][0] = (this.util.sign_extend_rshift_u32(a: p10 ~mod+ p11, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x5][0] = (this.util.sign_extend_rshift_u32(a: p13 ~mod+ p12, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x6][0] = (this.util.sign_extend_rshift_u32(a: p10 ~mod- p11, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x7][0] = (this.util.sign_extend_rshift_u32(a: p13 ~mod- p12, n: 3) & 0xFFFF) as base.u16
+
+    // ----
+
+    p20 = (m02 ~mod+ m32) ~mod+ 3
+    p21 = (m12 ~mod+ m22)
+    p22 = (m12 ~mod- m22)
+    p23 = (m02 ~mod- m32) ~mod+ 3
+
+    this.mb_coeffs[0x8][0] = (this.util.sign_extend_rshift_u32(a: p20 ~mod+ p21, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0x9][0] = (this.util.sign_extend_rshift_u32(a: p23 ~mod+ p22, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0xA][0] = (this.util.sign_extend_rshift_u32(a: p20 ~mod- p21, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0xB][0] = (this.util.sign_extend_rshift_u32(a: p23 ~mod- p22, n: 3) & 0xFFFF) as base.u16
+
+    // ----
+
+    p30 = (m03 ~mod+ m33) ~mod+ 3
+    p31 = (m13 ~mod+ m23)
+    p32 = (m13 ~mod- m23)
+    p33 = (m03 ~mod- m33) ~mod+ 3
+
+    this.mb_coeffs[0xC][0] = (this.util.sign_extend_rshift_u32(a: p30 ~mod+ p31, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0xD][0] = (this.util.sign_extend_rshift_u32(a: p33 ~mod+ p32, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0xE][0] = (this.util.sign_extend_rshift_u32(a: p30 ~mod- p31, n: 3) & 0xFFFF) as base.u16
+    this.mb_coeffs[0xF][0] = (this.util.sign_extend_rshift_u32(a: p33 ~mod- p32, n: 3) & 0xFFFF) as base.u16
+}

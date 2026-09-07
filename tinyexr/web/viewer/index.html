@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TinyEXR v3 — WASM Viewer</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <!-- Image stage ------------------------------------------------------ -->
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <canvas id="overlay"></canvas>
+
+    <!-- Top-right floating controls (always visible, touch-friendly) -->
+    <div id="topctrls">
+      <button id="btnFullscreen" title="Toggle fullscreen" aria-label="Toggle fullscreen">⛶</button>
+      <button id="panelToggle" title="Hide panel" aria-label="Toggle panel" aria-expanded="true">⮞</button>
+    </div>
+
+    <!-- Drop / empty state -->
+    <div id="dropzone">
+      <div class="dz-inner">
+        <div class="dz-title">Drop an <strong>.exr</strong> file here</div>
+        <div class="dz-sub">or use “Open .exr” in the panel — multipart, tiled,
+          mip, and all v3 codecs (ZIP / PIZ / PXR24 / B44 / ZSTD / HTJ2K)</div>
+      </div>
+    </div>
+
+    <!-- Pixel readout -->
+    <div id="pixel" class="hud hidden"></div>
+
+    <!-- False-color colormap legend -->
+    <div id="legend" class="hud hidden">
+      <div class="legend-top"><span id="legendChan">Lum</span><span class="legend-cm">viridis</span></div>
+      <div id="legendBar" class="legend-bar"></div>
+      <div class="legend-ends"><span>low</span><span>high</span></div>
+    </div>
+
+    <!-- Progress -->
+    <div id="progressWrap" class="hidden">
+      <div id="progressBar"></div>
+      <div id="progressLabel"></div>
+    </div>
+
+    <!-- Bottom-left view controls -->
+    <div id="viewbar" class="hidden">
+      <button id="btnFit" title="Fit to window">Fit</button>
+      <button id="btn11" title="100% (1:1)">1:1</button>
+      <button id="btnZoomRegion" title="Zoom to selected region" disabled>Zoom region</button>
+      <span id="zoomLabel">100%</span>
+    </div>
+
+    <div id="errorToast" class="hidden"></div>
+  </div>
+
+  <!-- Backdrop behind the panel drawer on small screens -->
+  <div id="panelBackdrop" class="hidden"></div>
+
+  <!-- Side panel ------------------------------------------------------- -->
+  <aside id="panel">
+    <header>
+      <h1>TinyEXR&nbsp;v3 <span class="badge">WASM</span></h1>
+      <div class="row">
+        <label class="filebtn">Open .exr
+          <input id="file" type="file" accept=".exr,image/x-exr" hidden />
+        </label>
+        <button id="btnSample" title="Loads sample.exr from this folder">Sample</button>
+        <button id="btnAsakusa" title="Fetches asakusa.exr over HTTP from the tinyexr repo">Asakusa</button>
+      </div>
+      <div class="row">
+        <button id="btnBrowse" title="Browse the OpenEXR sample image library">Browse OpenEXR images…</button>
+        <button id="btnDeep" title="Load the repo's deepscanline.exr as a 3D point cloud">Deep scanline (3D)</button>
+        <button id="btnDeepTiled" title="Load the repo's deep_tiled_sample.exr as a 3D point cloud">Deep tiled (3D)</button>
+      </div>
+      <div class="row">
+        <button id="btnSpectralSample" title="Load the bundled spectral_sample.exr (16-band emissive)">Spectral sample</button>
+        <button id="btnSpectral" title="Fetch + unzip the JCGT spectral sample images and pick one">Spectral samples…</button>
+      </div>
+    </header>
+
+    <section id="ctrls" class="hidden">
+      <h2>Display</h2>
+
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Exposure</span><span id="expVal">0.0 EV</span></div>
+        <input id="exposure" type="range" min="-8" max="8" step="0.1" value="0" />
+      </div>
+
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Gamma</span><span id="gammaVal">2.2</span></div>
+        <input id="gamma" type="range" min="1" max="3" step="0.05" value="2.2" />
+        <label class="chk"><input id="srgb" type="checkbox" checked /> sRGB curve</label>
+      </div>
+
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Channel</span></div>
+        <div id="channels" class="seg">
+          <button data-ch="0" class="active">RGB</button>
+          <button data-ch="1">R</button>
+          <button data-ch="2">G</button>
+          <button data-ch="3">B</button>
+          <button data-ch="4">A</button>
+          <button data-ch="5">Lum</button>
+        </div>
+        <label class="chk"><input id="falseColor" type="checkbox" disabled />
+          False color (viridis) — single channel only</label>
+      </div>
+
+      <div class="ctrl row2">
+        <div class="sel">
+          <label for="partSel">Part</label>
+          <select id="partSel"></select>
+        </div>
+        <div class="sel">
+          <label for="levelSel">Mip level</label>
+          <select id="levelSel"></select>
+        </div>
+      </div>
+
+      <div class="ctrl" id="channelView">
+        <div class="sel">
+          <label for="channelSel">Channel view</label>
+          <select id="channelSel"></select>
+        </div>
+      </div>
+
+      <div class="ctrl">
+        <label class="chk"><input id="showDisp" type="checkbox" checked /> Display-window overlay</label>
+        <label class="chk"><input id="cropDisp" type="checkbox" /> Crop to display window</label>
+      </div>
+
+      <div id="roiInfo" class="ctrl hidden">
+        <div class="ctrl-head"><span>Region (shift-drag)</span><button id="clearRoi" class="link">clear</button></div>
+        <div id="roiText" class="mono"></div>
+      </div>
+    </section>
+
+    <section id="deepCtrls" class="hidden">
+      <h2>Deep 3D point cloud</h2>
+      <div id="deepInfo" class="mono"></div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Point size</span><span id="ptVal">2.0</span></div>
+        <input id="ptSize" type="range" min="1" max="10" step="0.5" value="2" />
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Exposure</span><span id="deepExpVal">0.0 EV</span></div>
+        <input id="deepExposure" type="range" min="-8" max="8" step="0.1" value="0" />
+      </div>
+      <label class="chk"><input id="deepColorMode" type="checkbox" /> Color by RGB (default: depth)</label>
+      <div class="row" style="margin-top:10px">
+        <button id="resetView">Reset view</button>
+      </div>
+      <footer style="padding:10px 0 0">Drag to orbit · wheel to zoom · shift-drag (or right-drag) to pan</footer>
+    </section>
+
+    <section id="spectralCtrls" class="hidden">
+      <h2>Spectral</h2>
+      <div id="spectralInfo" class="mono"></div>
+      <label class="chk"><input id="spectralColor" type="checkbox" />
+        CIE color (sRGB) — composite all wavelengths</label>
+      <div class="ctrl" id="wavelengthCtrl" style="margin-top:12px">
+        <div class="ctrl-head"><span>Wavelength</span><span id="wlVal">—</span></div>
+        <input id="wavelength" type="range" min="0" max="0" step="1" value="0" />
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-head"><span>Pixel spectrum</span><span id="specPixelPos">—</span></div>
+        <canvas id="specPlot" width="280" height="150"></canvas>
+        <div class="specplot-hint">Hover the image to read a pixel's spectrum.</div>
+      </div>
+      <footer style="padding:10px 0 0">Scrub a single wavelength (grayscale) or
+        enable CIE color for a true-color sRGB composite; exposure/gamma still
+        apply. Polarised images use S0.</footer>
+    </section>
+
+    <section id="info" class="hidden">
+      <h2>Header / Info</h2>
+      <div id="infoBody"></div>
+    </section>
+
+    <footer>
+      Built on the v3 streaming block API. Spectral EXRs (JCGT layout) open in a
+      grayscale wavelength scrubber with a per-pixel spectrum plot.
+      <div class="ghrow">
+        <a id="ghLink" href="https://github.com/syoyo/tinyexr" target="_blank"
+           rel="noopener noreferrer" title="TinyEXR on GitHub">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+              0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01
+              1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
+              0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18
+              1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08
+              2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48
+              0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          <span>syoyo/tinyexr</span>
+        </a>
+      </div>
+    </footer>
+  </aside>
+
+  <!-- OpenEXR sample-image browser ------------------------------------- -->
+  <div id="browser" class="hidden">
+    <div class="browser-box">
+      <header class="browser-head">
+        <h2>OpenEXR sample images</h2>
+        <button id="browserClose" title="Close (Esc)">✕</button>
+      </header>
+      <div class="browser-sub">
+        From
+        <a href="https://github.com/AcademySoftwareFoundation/openexr-images"
+           target="_blank" rel="noopener noreferrer">AcademySoftwareFoundation/openexr-images</a>,
+        fetched over HTTP. Click a file to load it.
+        <input id="browserFilter" type="search" placeholder="filter…" />
+      </div>
+      <div id="browserTree" class="browser-tree"></div>
+    </div>
+  </div>
+
+  <!-- JCGT spectral sample-image browser ------------------------------- -->
+  <div id="specBrowser" class="hidden">
+    <div class="browser-box">
+      <header class="browser-head">
+        <h2>Spectral sample images</h2>
+        <button id="specBrowserClose" title="Close (Esc)">✕</button>
+      </header>
+      <div class="browser-sub">
+        From the JCGT 2021 paper
+        <a href="https://jcgt.org/published/0010/03/01/" target="_blank"
+           rel="noopener noreferrer">“An OpenEXR Layout for Spectral Images”</a>
+        (<code>sample-images.zip</code>), fetched + unzipped in the browser. The
+        archive is on jcgt.org which may block cross-origin requests; a CORS
+        proxy is used as a fallback. Click a file to load it.
+        <input id="specBrowserFilter" type="search" placeholder="filter…" />
+      </div>
+      <div id="specBrowserTree" class="browser-tree"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

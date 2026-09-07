@@ -1,0 +1,50 @@
+output.exr
+test_tinyexr
+*.o
+test/unit/tester
+test/unit/tester-v2
+test/unit/tester-v3
+test/unit/*.exr
+test/unit/*.o
+
+# pure-C11 v3 build outputs
+/build/
+*.obj
+*.exe
+test_tinyexr_v3
+test/unit/bench-v3
+test/unit/test_exr_v3
+test/v3/parse_harness
+test/v3/compare_exr
+test/v3/encode_harness
+test/v3/prof_driver
+test/v3/bench_decode
+test/v3/bench_decode_mt
+test/v3/__pycache__/
+
+# test/bench binaries (sanitizer/SIMD variants)
+test/unit/tester-*
+/tester-v2
+/test_debug_deflate
+/test_debug_deflate_simd
+/test_huffman
+/test_huffman_bmi
+/test_multipart
+/test_multipart_debug
+/test_multipart_tiled
+/test_simd
+/test_simd_avx2
+/test_v2_enhanced
+/test_v2_openexr_images
+/test_v2_writer
+
+# vendored zstd distribution: only the wrapper + license are tracked,
+# the rest is the upstream source tree extracted locally to build against.
+/deps/zstd/*
+!/deps/zstd/LICENSE
+!/deps/zstd/README.md
+!/deps/zstd/tinyexr_zstd.c
+!/deps/zstd/tinyexr_zstd.h
+
+# external OpenEXR test-image corpus (cloned locally, not part of this repo)
+/openexr-images/

@@ -1,0 +1,58 @@
+ocio_profile_version: 2
+
+description: |
+  Minimal ACES 2.0 demo config for tocio. Scene-linear working space is ACEScg;
+  the ACES 2.0 SDR output transforms render to sRGB and Display-P3. Edit this in
+  the panel and press "JIT compile" to regenerate the GPU shader live.
+
+roles:
+  scene_linear: ACEScg
+  aces_interchange: ACES2065-1
+  color_timing: ACEScct
+  default: Raw
+
+displays:
+  sRGB:
+    - !<View> {name: ACES 2.0 SDR, view_transform: ACES2_SDR_709, display_colorspace: sRGB - Display}
+    - !<View> {name: Raw, colorspace: Raw}
+  Display P3:
+    - !<View> {name: ACES 2.0 SDR, view_transform: ACES2_SDR_P3, display_colorspace: P3-D65 - Display}
+    - !<View> {name: Raw, colorspace: Raw}
+
+view_transforms:
+  - !<ViewTransform>
+    name: ACES2_SDR_709
+    from_scene_reference: !<BuiltinTransform> {style: ACES-OUTPUT - ACES2065-1_to_CIE-XYZ-D65 - SDR-100nit-REC709_2.0}
+  - !<ViewTransform>
+    name: ACES2_SDR_P3
+    from_scene_reference: !<BuiltinTransform> {style: ACES-OUTPUT - ACES2065-1_to_CIE-XYZ-D65 - SDR-100nit-P3-D65_2.0}
+
+display_colorspaces:
+  - !<ColorSpace>
+    name: sRGB - Display
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_sRGB}
+  - !<ColorSpace>
+    name: P3-D65 - Display
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_DisplayP3}
+
+colorspaces:
+  - !<ColorSpace>
+    name: ACEScg
+    description: ACES working space (AP1 linear)
+    to_scene_reference: !<BuiltinTransform> {style: ACEScg_to_ACES2065-1}
+    from_scene_reference: !<BuiltinTransform> {style: ACES2065-1_to_ACEScg}
+
+  - !<ColorSpace>
+    name: ACES2065-1
+    description: ACES interchange (AP0 linear) - the scene reference
+
+  - !<ColorSpace>
+    name: ACEScct
+    description: ACES log working space
+    to_scene_reference: !<BuiltinTransform> {style: ACEScct_to_ACES2065-1}
+    from_scene_reference: !<BuiltinTransform> {style: ACES2065-1_to_ACEScct}
+
+  - !<ColorSpace>
+    name: Raw
+    description: passthrough (not color managed)
+    isdata: true

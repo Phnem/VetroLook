@@ -1,0 +1,242 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+pri func decoder.decode_alph?(src: base.io_reader, workbuf: slice base.u8) {
+    var r_mark : base.u64
+    var status : base.status
+
+    while true {
+        io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
+            r_mark = args.src.mark()
+            status =? this.decode_alph_limited?(src: args.src, workbuf: args.workbuf)
+            this.sub_chunk_length ~sat-=
+                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+        }
+
+        if status.is_ok() {
+            break
+        } else if not status.is_suspension() {
+            return status
+        } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
+            return "#short chunk"
+        }
+        yield? status
+    }
+}
+
+pri func decoder.decode_alph_limited?(src: base.io_reader, workbuf: slice base.u8) {
+    var n : base.u64
+
+    this.vp8x_alph_flags = args.src.read_u8?()
+
+    if (this.vp8x_alph_flags & 3) == 0 {
+        args.src.limited_copy_u32_to_slice!(up_to: this.width * this.height, s: args.workbuf)
+    } else if (this.vp8x_alph_flags & 3) == 1 {
+        this.do_decode_frame_vp8l?(
+                dst: nullptr,
+                src: args.src,
+                blend: this.util.make_pixel_blend(repr: base.PIXEL_BLEND__SRC),
+                workbuf: args.workbuf,
+                opts: nullptr)
+
+        n = (this.width * this.height * 4) as base.u64
+        if n <= args.workbuf.length() {
+            this.compact_alph!(s: args.workbuf[.. n])
+        }
+    } else {
+        return "#bad VP8X chunk"
+    }
+    this.vp8x_alph_flags |= 2
+
+    n = (this.width * this.height) as base.u64
+    if n <= args.workbuf.length() {
+        if (this.vp8x_alph_flags & 0x0C) == 0x04 {
+            this.filter_alph_horizontal!(s: args.workbuf[.. n])
+        } else if (this.vp8x_alph_flags & 0x0C) == 0x08 {
+            this.filter_alph_vertical!(s: args.workbuf[.. n])
+        } else if (this.vp8x_alph_flags & 0x0C) == 0x0C {
+            this.filter_alph_gradient!(s: args.workbuf[.. n])
+        }
+    }
+}
+
+pri func decoder.compact_alph!(s: slice base.u8) {
+    var i : base.u64[..= 0x4000_0004]
+    var j : base.u64[..= 0x4000_0004]
+
+    if args.s.length() > 0x4000_0000 {
+        return nothing
+    }
+
+    i = 0
+    j = 1
+    while (i < args.s.length()) and (j < args.s.length()),
+            inv args.s.length() <= 0x4000_0000,
+    {
+        assert i <= 0x4000_0000 via "a <= b: a <= c; c <= b"(c: args.s.length())
+        assert j <= 0x4000_0000 via "a <= b: a <= c; c <= b"(c: args.s.length())
+        args.s[i] = args.s[j]
+        i += 1
+        j += 4
+    }
+}
+
+// libwebp calls this HorizontalUnfilter_C.
+pri func decoder.filter_alph_horizontal!(s: slice base.u8) {
+    var y    : base.u32
+    var x    : base.u32
+    var i    : base.u64
+    var pred : base.u8
+
+    y = 0
+    while y < this.height {
+        assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
+
+        pred = 0
+        if y > 0 {
+            i = ((y - 1) * this.width) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            pred = args.s[i]
+        }
+
+        x = 0
+        while x < this.width,
+                inv y < 0x4000,
+        {
+            assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
+
+            i = ((y * this.width) + x) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            args.s[i] ~mod+= pred
+            pred = args.s[i]
+
+            x += 1
+        }
+        y += 1
+    }
+}
+
+// libwebp calls this VerticalUnfilter_C.
+pri func decoder.filter_alph_vertical!(s: slice base.u8) {
+    var y    : base.u32
+    var x    : base.u32
+    var i    : base.u64
+    var pred : base.u8
+
+    x = 0
+    while x < this.width {
+        assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
+
+        pred = 0
+        if x > 0 {
+            i = (x - 1) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            pred = args.s[i]
+        }
+
+        y = 0
+        while y < this.height,
+                inv x < 0x4000,
+        {
+            assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
+
+            i = ((y * this.width) + x) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            args.s[i] ~mod+= pred
+            pred = args.s[i]
+
+            y += 1
+        }
+        x += 1
+    }
+}
+
+// libwebp calls this GradientUnfilter_C.
+pri func decoder.filter_alph_gradient!(s: slice base.u8) {
+    var y    : base.u32
+    var x    : base.u32
+    var i    : base.u64
+    var pred : base.u8
+    var grad : base.u32
+    var l    : base.u8  // Left sample.
+    var t    : base.u8  // Top sample.
+    var tl   : base.u8  // Top-Left sample.
+
+    // First row.
+    x = 0
+    while x < this.width {
+        assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
+
+        i = x as base.u64
+        if i >= args.s.length() {
+            break
+        }
+        args.s[i] ~mod+= pred
+        pred = args.s[i]
+
+        x += 1
+    }
+
+    // Other rows.
+    y = 1
+    while y < this.height,
+            inv y >= 1,
+    {
+        assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
+
+        i = (((y - 1) * this.width) + 0) as base.u64
+        if i >= args.s.length() {
+            break
+        }
+        t = args.s[i]
+        tl = t
+        l = t
+
+        x = 0
+        while x < this.width,
+                inv y >= 1,
+                inv y < 0x4000,
+        {
+            assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
+
+            i = (((y - 1) * this.width) + x) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            t = args.s[i]
+
+            i = ((y * this.width) + x) as base.u64
+            if i >= args.s.length() {
+                break
+            }
+            grad = ((l as base.u32) ~mod+ (t as base.u32)) ~mod- (tl as base.u32)
+            if grad > 0x7FFF_FFFF {
+                grad = 0x00
+            } else if grad > 0xFF {
+                grad = 0xFF
+            }
+            l = args.s[i] ~mod+ ((grad & 0xFF) as base.u8)
+            args.s[i] = l
+            tl = t
+
+            x += 1
+        }
+
+        y += 1
+    }
+}

@@ -1,0 +1,82 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// RFC 6386 Section 7. Boolean Entropy Decoder.
+
+pri func decoder.read_bit!(workbuf: roslice base.u8, part: base.u32[..= 8], prob: base.u32[..= 0xFF]) base.u32[..= 1] {
+    var p        : base.u32[..= 8]
+    var c8       : base.u8
+    var shift    : base.u32[..= 31]
+    var split_m1 : base.u32[..= 0xFE]
+    var ret      : base.u32[..= 1]
+
+    p = args.part
+    if this.part_n_bits[p] < 8 {
+        c8 = 0
+        if this.part_workbuf_ris[p] < args.workbuf.length() {
+            assert this.part_workbuf_ris[p] < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
+            c8 = args.workbuf[this.part_workbuf_ris[p]]
+            this.part_workbuf_ris[p] += 1
+        }
+        this.part_bits[p] = (this.part_bits[p] ~mod<< 8) | (c8 as base.u32)
+        this.part_n_bits[p] ~mod+= 8
+    }
+
+    shift = (this.part_n_bits[p] ~mod- 8) & 31
+    split_m1 = ((this.part_range_m1s[p] * args.prob) >> 8)
+
+    if (this.part_bits[p] >> shift) > split_m1 {
+        ret = 1
+        this.part_range_m1s[p] = (this.part_range_m1s[p] ~mod- (split_m1 + 1)) & 0xFF
+        this.part_bits[p] ~mod-= (split_m1 + 1) ~mod<< shift
+
+    } else {
+        ret = 0
+        this.part_range_m1s[p] = split_m1
+    }
+
+    this.part_n_bits[p] ~mod-= RENORM_SHIFT[this.part_range_m1s[p]] as base.u32
+    this.part_range_m1s[p] = RENORM_RANGE_M1[this.part_range_m1s[p]] as base.u32
+
+    return ret
+}
+
+pri func decoder.read_unsigned!(workbuf: roslice base.u8, part: base.u32[..= 8], n: base.u32[..= 31]) base.u32 {
+    var n   : base.u32[..= 31]
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+
+    n = args.n
+    while n > 0 {
+        n -= 1
+        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
+        v32 |= v1 ~mod<< n
+    }
+    return v32
+}
+
+pri func decoder.read_signed!(workbuf: roslice base.u8, part: base.u32[..= 8], n: base.u32[..= 31]) base.u32 {
+    var v1  : base.u32[..= 1]
+    var v32 : base.u32
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
+    if v1 == 0 {
+        return 0
+    }
+
+    v32 = this.read_unsigned!(workbuf: args.workbuf, part: args.part, n: args.n)
+    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
+    if v1 == 0 {
+        return v32
+    }
+    return 0 ~mod- v32
+}

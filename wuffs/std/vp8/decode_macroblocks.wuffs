@@ -1,0 +1,419 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+pri func decoder.decode_macroblocks!(workbuf: slice base.u8) base.status {
+    var mby : base.u32
+    var mbx : base.u32
+
+    mbx = 0
+    while mbx < this.mbw {
+        assert mbx < 0x400 via "a < b: a < c; c <= b"(c: this.mbw)
+
+        this.mb_states_top[mbx] = 0
+
+        mbx += 1
+    }
+
+    mby = 0
+    while mby < this.mbh {
+        assert mby < 0x400 via "a < b: a < c; c <= b"(c: this.mbh)
+
+        this.mb_states_left = 0
+
+        // Decode this row, using this.mb_coeffs and this.yuv_cache before
+        // ultimately writing to args.workbuf.
+        mbx = 0
+        while mbx < this.mbw,
+                inv mby < 0x400,
+        {
+            assert mbx < 0x400 via "a < b: a < c; c <= b"(c: this.mbw)
+
+            this.decode_one_macroblock!(workbuf: args.workbuf, mbx: mbx, mby: mby)
+
+            mbx += 1
+        }
+
+        // Filter the previous row, already in args.workbuf.
+        if mby > 0 {
+            if this.filt_level <= 0 {
+                // No-op.
+            } else if this.filt_simple {
+                this.filter_simple!(workbuf: args.workbuf, mby: mby - 1)
+            } else {
+                this.filter_normal!(workbuf: args.workbuf, mby: mby - 1)
+            }
+        }
+
+        mby += 1
+    }
+
+    // Filter the final row, already in args.workbuf.
+    if this.mbh > 0 {
+        if this.filt_level <= 0 {
+            // No-op.
+        } else if this.filt_simple {
+            this.filter_simple!(workbuf: args.workbuf, mby: this.mbh - 1)
+        } else {
+            this.filter_normal!(workbuf: args.workbuf, mby: this.mbh - 1)
+        }
+
+    }
+
+    return ok
+}
+
+pri func decoder.decode_one_macroblock!(workbuf: slice base.u8, mbx: base.u32[..= 0x3FF], mby: base.u32[..= 0x3FF]) {
+    var v1 : base.u32[..= 1]
+
+    var seg         : base.u32[..= 3]
+    var skip        : base.u32[..= 1]
+    var mask        : base.u32
+    var luma_mode   : base.u32[..= 4]
+    var chroma_mode : base.u32[..= 3]
+
+    // RFC 6386 Section 10. Segment-Based Feature Adjustments.
+    seg = 0
+    if this.seg_update_map {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: this.seg_probs[0] as base.u32)
+        if v1 == 0 {
+            v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: this.seg_probs[1] as base.u32)
+            seg = v1
+        } else {
+            v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: this.seg_probs[2] as base.u32)
+            seg = v1 + 2
+        }
+    }
+
+    skip = 0
+    if (this.prob_skip & 0x100) <> 0 {
+        skip = this.read_bit!(workbuf: args.workbuf, part: 0, prob: this.prob_skip & 0xFF)
+    }
+
+    luma_mode = this.decode_luma_mode!(workbuf: args.workbuf)
+    this.decode_subblock_modes!(workbuf: args.workbuf, mbx: args.mbx, luma_mode: luma_mode)
+
+    chroma_mode = this.decode_chroma_mode!(workbuf: args.workbuf)
+
+    if skip <> 0 {
+        // Clear the HNZC bits.
+        mask = 0x0000_FFFF
+        if luma_mode >= 4 {
+            mask = 0x0080_FFFF
+        }
+        this.mb_states_left &= mask
+        this.mb_states_top[args.mbx] &= mask
+        this.mb_dc_nz = 0
+        this.mb_ac_nz = 0
+
+    } else {
+        skip = this.decode_coefficients!(
+                workbuf: args.workbuf, mbx: args.mbx, mby: args.mby,
+                seg: seg, luma_mode: luma_mode)
+    }
+
+    this.reconstruct!(
+            workbuf: args.workbuf, mbx: args.mbx, mby: args.mby,
+            luma_mode: luma_mode, chroma_mode: chroma_mode)
+
+    this.copy_from_yuv_cache!(
+            workbuf: args.workbuf, mbx: args.mbx, mby: args.mby)
+
+    this.mb_filters[args.mby & 1][args.mbx] =
+            (((1 ^ skip) << 3) | (seg << 1) | (luma_mode >> 2)) as base.u8
+}
+
+// RFC 6386 Section 11.2. Luma Modes.
+//
+// 0 = B_DC_PRED = predict DC using row above and column to the left.
+// 1 = B_TM_PRED = propagate second differences a la "True Motion".
+// 2 = B_VE_PRED = predict rows using row above.
+// 3 = B_HE_PRED = predict columns using column to the left.
+// 4 = B_PRED    = each Y subblock is independently predicted.
+//
+// Returning (as luma_mode) at least 4 (equivalently, returning B_PRED) means
+// that we use "intra4x4 prediction" (as opposed to "intra16x16 prediction").
+// (luma_mode >= 4) here is equivalent to libwebp's "is_i4x4 == true" and
+// golang.org/x/image/vp8's "usePredY16 == false".
+//
+// The RFC gives an enum in (DC_PRED, V_PRED, H_PRED, TM_PRED, B_PRED) order
+// but the libwebp implementation uses a different one, (B_DC_PRED, B_TM_PRED,
+// B_VE_PRED, B_HE_PRED, B_PRED). Modulo the B_ prefixes, it's DC,V,H,TM versus
+// DC,TM,VE,HE. At some point, the internal enum values were re-assigned after
+// the RFC was written.
+//
+// libwebp also uses B_PRED=10 instead of the RFC's B_PRED=4. We use 4.
+pri func decoder.decode_luma_mode!(workbuf: slice base.u8) base.u32[..= 4] {
+    var v1 : base.u32[..= 1]
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 145)
+    if v1 == 0 {
+        return 4  // 4=B_PRED. is_i4x4 == true. usePredY16 == false.
+    }
+
+    // Otherwise, is_i4x4 == false. usePredY16 == true.
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 156)
+    if v1 == 0 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 163)
+        return 2 * v1  // 0=B_DC_PRED or 2=B_VE_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
+    return 3 - (2 * v1)  // 3=B_HE_PRED or 1=B_TM_PRED.
+}
+
+// RFC 6386 Section 11.4. Chroma Modes.
+//
+// 0 = B_DC_PRED, etc, the same as the Luma Modes, except there's no B_PRED.
+pri func decoder.decode_chroma_mode!(workbuf: slice base.u8) base.u32[..= 3] {
+    var v1 : base.u32[..= 1]
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 142)
+    if v1 == 0 {
+        return 0  // 0=B_DC_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 114)
+    if v1 == 0 {
+        return 2  // 2=B_VE_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 183)
+    return 3 - (2 * v1)  // 3=B_HE_PRED or 1=B_TM_PRED.
+}
+
+// RFC 6386 Section 11.2. Luma Modes.
+pri func decoder.decode_subblock_modes!(
+        workbuf: slice base.u8,
+        mbx: base.u32[..= 0x3FF],
+        luma_mode: base.u32[..= 4]) {
+    var i         : base.u32
+    var top_mode  : base.u8[..= 9]
+    var left_mode : base.u8[..= 9]
+    var mode      : base.u8[..= 9]
+
+    if args.luma_mode < 4 {
+        this.mb_states_top[args.mbx] = (this.mb_states_top[args.mbx] & 0xFFFF_0000) |
+                ((args.luma_mode as base.u32) * 0x1111)
+        this.mb_states_left = (this.mb_states_left & 0xFFFF_0000) |
+                ((args.luma_mode as base.u32) * 0x1111)
+        return nothing
+    }
+
+    i = 0
+    while i < 16 {
+        if i < 4 {
+            top_mode = CLAMP_NO_MORE_THAN_9[15 & (this.mb_states_top[args.mbx] >> (i * 4))]
+        } else {
+            top_mode = this.mb_subblock_modes[i - 4]
+        }
+
+        if (i & 3) == 0 {
+            left_mode = CLAMP_NO_MORE_THAN_9[15 & (this.mb_states_left >> (i & 12))]
+        } else {
+            left_mode = this.mb_subblock_modes[(i ~mod+ 15) & 15]
+        }
+
+        mode = this.decode_one_subblock_mode!(workbuf: args.workbuf, top_mode: top_mode, left_mode: left_mode)
+        this.mb_subblock_modes[i] = mode
+
+        i += 1
+    }
+
+    this.mb_states_top[args.mbx] = (this.mb_states_top[args.mbx] & 0xFFFF_0000) |
+            ((this.mb_subblock_modes[0xC] as base.u32) << 0x0) |
+            ((this.mb_subblock_modes[0xD] as base.u32) << 0x4) |
+            ((this.mb_subblock_modes[0xE] as base.u32) << 0x8) |
+            ((this.mb_subblock_modes[0xF] as base.u32) << 0xC)
+    this.mb_states_left = (this.mb_states_left & 0xFFFF_0000) |
+            ((this.mb_subblock_modes[0x3] as base.u32) << 0x0) |
+            ((this.mb_subblock_modes[0x7] as base.u32) << 0x4) |
+            ((this.mb_subblock_modes[0xB] as base.u32) << 0x8) |
+            ((this.mb_subblock_modes[0xF] as base.u32) << 0xC)
+}
+
+// RFC 6386 Section 11.3. Subblock Mode Contexts.
+pri func decoder.decode_one_subblock_mode!(
+        workbuf: slice base.u8,
+        top_mode: base.u8[..= 9],
+        left_mode: base.u8[..= 9]) base.u8[..= 9] {
+    var v1 : base.u32[..= 1]
+    var tm : base.u8[..= 9]
+    var lm : base.u8[..= 9]
+
+    tm = args.top_mode
+    lm = args.left_mode
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][0] as base.u32)
+    if v1 == 0 {
+        return 0  // 0=B_DC_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][1] as base.u32)
+    if v1 == 0 {
+        return 1  // 1=B_TM_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][2] as base.u32)
+    if v1 == 0 {
+        return 2  // 2=B_VE_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][3] as base.u32)
+    if v1 == 0 {
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][4] as base.u32)
+        if v1 == 0 {
+            return 3  // 3=B_HE_PRED.
+        }
+
+        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][5] as base.u32)
+        if v1 == 0 {
+            return 4  // 4=B_RD_PRED.
+        }
+
+        return 5  // 5=B_VR_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][6] as base.u32)
+    if v1 == 0 {
+        return 6  // 6=B_LD_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][7] as base.u32)
+    if v1 == 0 {
+        return 7  // 7=B_VL_PRED.
+    }
+
+    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: SUBBLOCK_MODE_PROBS[tm][lm][8] as base.u32)
+    if v1 == 0 {
+        return 8  // 8=B_HD_PRED.
+    }
+
+    return 9  // 9=B_HU_PRED.
+}
+
+pri func decoder.copy_from_yuv_cache!(
+        workbuf: slice base.u8,
+        mbx: base.u32[..= 0x3FF],
+        mby: base.u32[..= 0x3FF]) {
+    var w   : base.u64
+    var i   : base.u32
+    var dst : slice base.u8
+
+    w = ((((args.mby * this.workbuf_yuv_y_stride) + args.mbx) * 16) as base.u64) + 0
+    i = 0
+    while i < 16 {
+        if w < args.workbuf.length() {
+            dst = args.workbuf[w ..]
+            dst.copy_from_slice!(s: this.yuv_cache[i + 0x01][0x08 .. 0x18])
+        }
+        w ~mod+= this.workbuf_yuv_y_stride as base.u64
+        i += 1
+    }
+
+    w = ((((args.mby * this.workbuf_yuv_uv_stride) + args.mbx) * 8) as base.u64) + this.workbuf_yuv_y_end
+    i = 0
+    while i < 8 {
+        if w < args.workbuf.length() {
+            dst = args.workbuf[w ..]
+            dst.copy_from_slice!(s: this.yuv_cache[i + 0x12][0x08 .. 0x10])
+        }
+        w ~mod+= this.workbuf_yuv_uv_stride as base.u64
+        i += 1
+    }
+
+    w = ((((args.mby * this.workbuf_yuv_uv_stride) + args.mbx) * 8) as base.u64) + this.workbuf_yuv_u_end
+    i = 0
+    while i < 8 {
+        if w < args.workbuf.length() {
+            dst = args.workbuf[w ..]
+            dst.copy_from_slice!(s: this.yuv_cache[i + 0x12][0x18 .. 0x20])
+        }
+        w ~mod+= this.workbuf_yuv_uv_stride as base.u64
+        i += 1
+    }
+}
+
+pri func decoder.swizzle!(
+        dst: ptr base.pixel_buffer,
+        blend: base.pixel_blend,
+        workbuf: slice base.u8) base.status {
+    var wh        : base.u64[..= 0xFFF_8001]
+    var prefix    : slice base.u8
+    var suffix    : slice base.u8
+    var has_alpha : base.u32[..= 1]
+    var ycc_model : base.u32[..= 0xFF]
+    var status    : base.status
+
+    if this.quirk_has_alpha_side_channel {
+        if this.quirk_width_and_height == 0 {
+            return "#inconsistent width and height"
+        }
+        wh = (this.width * this.height) as base.u64
+        if wh > args.workbuf.length() {
+            return base."#bad workbuf length"
+        }
+        prefix = args.workbuf[.. wh]
+        suffix = args.workbuf[wh ..]
+        has_alpha = 1
+        ycc_model = base.YCC_MODEL__BT_601_STUDIO_RANGE__ALPHA__SRC |
+                (0x01 & (this.util.demake_pixel_blend(a: args.blend) as base.u32))
+
+    } else {
+        prefix = this.util.empty_slice_u8()
+        suffix = args.workbuf
+        has_alpha = 0
+        ycc_model = base.YCC_MODEL__BT_601_STUDIO_RANGE
+    }
+
+    if (this.workbuf_yuv_y_end > this.workbuf_yuv_u_end) or
+            (this.workbuf_yuv_u_end > this.workbuf_yuv_v_end) or
+            (this.workbuf_yuv_v_end > suffix.length()) {
+        return base."#bad workbuf length"
+    }
+    assert this.workbuf_yuv_u_end <= suffix.length() via "a <= b: a <= c; c <= b"(c: this.workbuf_yuv_v_end)
+    assert this.workbuf_yuv_y_end <= suffix.length() via "a <= b: a <= c; c <= b"(c: this.workbuf_yuv_u_end)
+
+    status = this.swizzler.swizzle_ycck!(
+            dst: args.dst,
+            dst_palette: args.dst.palette(),
+            x_min_incl: 0,
+            x_max_excl: this.width,
+            y_min_incl: 0,
+            y_max_excl: this.height,
+            src0: suffix[.. this.workbuf_yuv_y_end],
+            src1: suffix[this.workbuf_yuv_y_end .. this.workbuf_yuv_u_end],
+            src2: suffix[this.workbuf_yuv_u_end .. this.workbuf_yuv_v_end],
+            src3: prefix,
+            width0: this.mbw * 16,
+            width1: this.mbw * 8,
+            width2: this.mbw * 8,
+            width3: this.width * has_alpha,
+            height0: this.mbh * 16,
+            height1: this.mbh * 8,
+            height2: this.mbh * 8,
+            height3: this.height * has_alpha,
+            stride0: this.mbw * 16,
+            stride1: this.mbw * 8,
+            stride2: this.mbw * 8,
+            stride3: this.width * has_alpha,
+            h0: 2,
+            h1: 1,
+            h2: 1,
+            h3: (2 * has_alpha) as base.u8,
+            v0: 2,
+            v1: 1,
+            v2: 1,
+            v3: (2 * has_alpha) as base.u8,
+            ycc_model: ycc_model as base.u8,
+            ycc_upsampling: base.YCC_UPSAMPLING__FANCY_LIKE_LIBWEBP as base.u8,
+            scratch_buffer_2k: this.swizzle_ycck_scratch_buffer_2k[..])
+    return status
+}

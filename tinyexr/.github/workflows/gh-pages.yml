@@ -1,0 +1,64 @@
+name: Deploy WASM viewer to GitHub Pages
+
+# Publishes three static WASM demos as the Pages site:
+#   /          web/viewer   — the pure-C11 v3 WASM EXR viewer
+#   /tocio/    web/tocio    — the tocio OCIO (ACES 2.0) + WebGL2 demo
+#   /texcomp/  web/texcomp  — live texture compression (tir + texcomp + texpipe)
+# All generated *.mjs / *.wasm and the bundled sample images are committed to
+# the repo, so no Emscripten build runs here — we just stage the two directories
+# into one tree and upload it as the Pages artifact.
+
+on:
+  # Deploy on every push to the release branch that touches either demo.
+  push:
+    branches: ["release"]
+    paths:
+      - "web/viewer/**"
+      - "web/tocio/**"
+      - "web/texcomp/**"
+      - ".github/workflows/gh-pages.yml"
+  # Allow manual deploys from the Actions tab.
+  workflow_dispatch:
+
+# Least-privilege token for Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment; don't cancel an in-progress one so a
+# running publish always finishes.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Stage site (viewer at root, other demos in subdirs)
+        run: |
+          mkdir -p _site
+          cp -r web/viewer/. _site/
+          mkdir -p _site/tocio
+          cp -r web/tocio/. _site/tocio/
+          mkdir -p _site/texcomp
+          cp -r web/texcomp/. _site/texcomp/
+
+      - name: Upload site as Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

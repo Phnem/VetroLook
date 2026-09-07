@@ -1,0 +1,681 @@
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// --------
+
+// RFC 6386 Section 12. Intraframe Prediction.
+//
+// These methods read from and write to yuv_cache.
+
+// --------
+
+// Predicts a 4×4 luma subblock, the Xs below, based on samples top and left.
+//
+//  a b c d e f g h i
+//  p X X X X
+//  q X X X X
+//  r X X X X
+//  s X X X X
+pri func decoder.predict_y4!(b: base.u32[..= 15]) {
+    var cachey : base.u32[..= 13]
+    var cachex : base.u32[..= 20]
+    var mode   : base.u32[..= 9]
+    var z      : base.u32
+
+    var avg : base.u8
+
+    var tm0 : base.u32
+    var tm1 : base.u32
+    var tm2 : base.u32
+
+    var a : base.u32
+    var b : base.u32
+    var c : base.u32
+    var d : base.u32
+    var e : base.u32
+    var f : base.u32
+    var g : base.u32
+    var h : base.u32
+    var i : base.u32
+    var p : base.u32
+    var q : base.u32
+    var r : base.u32
+    var s : base.u32
+
+    var ab : base.u8
+    var bc : base.u8
+    var cd : base.u8
+    var de : base.u8
+    var ef : base.u8
+    var pa : base.u8
+    var qp : base.u8
+    var rq : base.u8
+    var sr : base.u8
+
+    var abc : base.u8
+    var bcd : base.u8
+    var cde : base.u8
+    var def : base.u8
+    var efg : base.u8
+    var fgh : base.u8
+    var ghi : base.u8
+    var hii : base.u8
+    var pab : base.u8
+    var qpa : base.u8
+    var rqp : base.u8
+    var srq : base.u8
+    var ssr : base.u8
+    var sss : base.u8
+
+    cachey = ((args.b & 0xC) * 1) + 1
+    cachex = ((args.b & 0x3) * 4) + 8
+    mode = this.mb_subblock_modes[args.b] as base.u32
+
+    if mode == 0 {  // DC.
+        avg = ((4 +
+                (this.yuv_cache[cachey - 1][cachex + 0] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 1] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 2] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 3] as base.u32) +
+                (this.yuv_cache[cachey + 0][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 1][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 2][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 3][cachex - 1] as base.u32)) / 8) as base.u8
+
+        z = 0
+        while z < 16 {
+            this.yuv_cache[cachey + (z >> 2)][cachex + (z & 3)] = avg
+            z += 1
+        }
+
+    } else if mode == 1 {  // TM.
+        tm0 = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        z = 0
+        while z < 16,
+                inv cachey >= 1,
+                inv cachex >= 8,
+        {
+            tm1 = this.yuv_cache[cachey + (z >> 2)][cachex - 1] as base.u32
+            tm2 = this.yuv_cache[cachey - 1][cachex + (z & 3)] as base.u32
+            this.yuv_cache[cachey + (z >> 2)][cachex + (z & 3)] =
+                    CLAMP[((tm1 + tm2) ~mod- tm0) & 1023]
+            z += 1
+        }
+
+    } else if mode == 2 {  // VE.
+        a = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+        e = this.yuv_cache[cachey - 1][cachex + 3] as base.u32
+        f = this.yuv_cache[cachey - 1][cachex + 4] as base.u32
+
+        def = (((d + (2 * e) + f + 2) / 4) & 0xFF) as base.u8
+        cde = (((c + (2 * d) + e + 2) / 4) & 0xFF) as base.u8
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+        abc = (((a + (2 * b) + c + 2) / 4) & 0xFF) as base.u8
+
+        z = 0
+        while z < 4 {
+            this.yuv_cache[cachey + z][cachex + 0] = abc
+            this.yuv_cache[cachey + z][cachex + 1] = bcd
+            this.yuv_cache[cachey + z][cachex + 2] = cde
+            this.yuv_cache[cachey + z][cachex + 3] = def
+            z += 1
+        }
+
+    } else if mode == 3 {  // HE.
+        s = this.yuv_cache[cachey + 3][cachex - 1] as base.u32
+        r = this.yuv_cache[cachey + 2][cachex - 1] as base.u32
+        q = this.yuv_cache[cachey + 1][cachex - 1] as base.u32
+        p = this.yuv_cache[cachey + 0][cachex - 1] as base.u32
+        a = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+
+        qpa = (((q + (2 * p) + a + 2) / 4) & 0xFF) as base.u8
+        rqp = (((r + (2 * q) + p + 2) / 4) & 0xFF) as base.u8
+        srq = (((s + (2 * r) + q + 2) / 4) & 0xFF) as base.u8
+        ssr = (((s + (2 * s) + r + 2) / 4) & 0xFF) as base.u8
+
+        z = 0
+        while z < 4 {
+            this.yuv_cache[cachey + 0][cachex + z] = qpa
+            this.yuv_cache[cachey + 1][cachex + z] = rqp
+            this.yuv_cache[cachey + 2][cachex + z] = srq
+            this.yuv_cache[cachey + 3][cachex + z] = ssr
+            z += 1
+        }
+
+    } else if mode == 4 {  // RD.
+        s = this.yuv_cache[cachey + 3][cachex - 1] as base.u32
+        r = this.yuv_cache[cachey + 2][cachex - 1] as base.u32
+        q = this.yuv_cache[cachey + 1][cachex - 1] as base.u32
+        p = this.yuv_cache[cachey + 0][cachex - 1] as base.u32
+        a = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+        e = this.yuv_cache[cachey - 1][cachex + 3] as base.u32
+
+        cde = (((c + (2 * d) + e + 2) / 4) & 0xFF) as base.u8
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+        abc = (((a + (2 * b) + c + 2) / 4) & 0xFF) as base.u8
+        pab = (((p + (2 * a) + b + 2) / 4) & 0xFF) as base.u8
+        qpa = (((q + (2 * p) + a + 2) / 4) & 0xFF) as base.u8
+        rqp = (((r + (2 * q) + p + 2) / 4) & 0xFF) as base.u8
+        srq = (((s + (2 * r) + q + 2) / 4) & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = pab
+        this.yuv_cache[cachey + 0][cachex + 1] = abc
+        this.yuv_cache[cachey + 0][cachex + 2] = bcd
+        this.yuv_cache[cachey + 0][cachex + 3] = cde
+
+        this.yuv_cache[cachey + 1][cachex + 0] = qpa
+        this.yuv_cache[cachey + 1][cachex + 1] = pab
+        this.yuv_cache[cachey + 1][cachex + 2] = abc
+        this.yuv_cache[cachey + 1][cachex + 3] = bcd
+
+        this.yuv_cache[cachey + 2][cachex + 0] = rqp
+        this.yuv_cache[cachey + 2][cachex + 1] = qpa
+        this.yuv_cache[cachey + 2][cachex + 2] = pab
+        this.yuv_cache[cachey + 2][cachex + 3] = abc
+
+        this.yuv_cache[cachey + 3][cachex + 0] = srq
+        this.yuv_cache[cachey + 3][cachex + 1] = rqp
+        this.yuv_cache[cachey + 3][cachex + 2] = qpa
+        this.yuv_cache[cachey + 3][cachex + 3] = pab
+
+    } else if mode == 5 {  // VR.
+        r = this.yuv_cache[cachey + 2][cachex - 1] as base.u32
+        q = this.yuv_cache[cachey + 1][cachex - 1] as base.u32
+        p = this.yuv_cache[cachey + 0][cachex - 1] as base.u32
+        a = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+        e = this.yuv_cache[cachey - 1][cachex + 3] as base.u32
+
+        ab = (((a + b + 1) / 2) & 0xFF) as base.u8
+        bc = (((b + c + 1) / 2) & 0xFF) as base.u8
+        cd = (((c + d + 1) / 2) & 0xFF) as base.u8
+        de = (((d + e + 1) / 2) & 0xFF) as base.u8
+
+        cde = (((c + (2 * d) + e + 2) / 4) & 0xFF) as base.u8
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+        abc = (((a + (2 * b) + c + 2) / 4) & 0xFF) as base.u8
+        pab = (((p + (2 * a) + b + 2) / 4) & 0xFF) as base.u8
+        qpa = (((q + (2 * p) + a + 2) / 4) & 0xFF) as base.u8
+        rqp = (((r + (2 * q) + p + 2) / 4) & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = ab
+        this.yuv_cache[cachey + 0][cachex + 1] = bc
+        this.yuv_cache[cachey + 0][cachex + 2] = cd
+        this.yuv_cache[cachey + 0][cachex + 3] = de
+
+        this.yuv_cache[cachey + 1][cachex + 0] = pab
+        this.yuv_cache[cachey + 1][cachex + 1] = abc
+        this.yuv_cache[cachey + 1][cachex + 2] = bcd
+        this.yuv_cache[cachey + 1][cachex + 3] = cde
+
+        this.yuv_cache[cachey + 2][cachex + 0] = qpa
+        this.yuv_cache[cachey + 2][cachex + 1] = ab
+        this.yuv_cache[cachey + 2][cachex + 2] = bc
+        this.yuv_cache[cachey + 2][cachex + 3] = cd
+
+        this.yuv_cache[cachey + 3][cachex + 0] = rqp
+        this.yuv_cache[cachey + 3][cachex + 1] = pab
+        this.yuv_cache[cachey + 3][cachex + 2] = abc
+        this.yuv_cache[cachey + 3][cachex + 3] = bcd
+
+    } else if mode == 6 {  // LD.
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+        e = this.yuv_cache[cachey - 1][cachex + 3] as base.u32
+        f = this.yuv_cache[cachey - 1][cachex + 4] as base.u32
+        g = this.yuv_cache[cachey - 1][cachex + 5] as base.u32
+        h = this.yuv_cache[cachey - 1][cachex + 6] as base.u32
+        i = this.yuv_cache[cachey - 1][cachex + 7] as base.u32
+
+        hii = (((h + (2 * i) + i + 2) / 4) & 0xFF) as base.u8
+        ghi = (((g + (2 * h) + i + 2) / 4) & 0xFF) as base.u8
+        fgh = (((f + (2 * g) + h + 2) / 4) & 0xFF) as base.u8
+        efg = (((e + (2 * f) + g + 2) / 4) & 0xFF) as base.u8
+        def = (((d + (2 * e) + f + 2) / 4) & 0xFF) as base.u8
+        cde = (((c + (2 * d) + e + 2) / 4) & 0xFF) as base.u8
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = bcd
+        this.yuv_cache[cachey + 0][cachex + 1] = cde
+        this.yuv_cache[cachey + 0][cachex + 2] = def
+        this.yuv_cache[cachey + 0][cachex + 3] = efg
+
+        this.yuv_cache[cachey + 1][cachex + 0] = cde
+        this.yuv_cache[cachey + 1][cachex + 1] = def
+        this.yuv_cache[cachey + 1][cachex + 2] = efg
+        this.yuv_cache[cachey + 1][cachex + 3] = fgh
+
+        this.yuv_cache[cachey + 2][cachex + 0] = def
+        this.yuv_cache[cachey + 2][cachex + 1] = efg
+        this.yuv_cache[cachey + 2][cachex + 2] = fgh
+        this.yuv_cache[cachey + 2][cachex + 3] = ghi
+
+        this.yuv_cache[cachey + 3][cachex + 0] = efg
+        this.yuv_cache[cachey + 3][cachex + 1] = fgh
+        this.yuv_cache[cachey + 3][cachex + 2] = ghi
+        this.yuv_cache[cachey + 3][cachex + 3] = hii
+
+    } else if mode == 7 {  // VL.
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+        e = this.yuv_cache[cachey - 1][cachex + 3] as base.u32
+        f = this.yuv_cache[cachey - 1][cachex + 4] as base.u32
+        g = this.yuv_cache[cachey - 1][cachex + 5] as base.u32
+        h = this.yuv_cache[cachey - 1][cachex + 6] as base.u32
+        i = this.yuv_cache[cachey - 1][cachex + 7] as base.u32
+
+        ef = (((e + f + 1) / 2) & 0xFF) as base.u8
+        de = (((d + e + 1) / 2) & 0xFF) as base.u8
+        cd = (((c + d + 1) / 2) & 0xFF) as base.u8
+        bc = (((b + c + 1) / 2) & 0xFF) as base.u8
+
+        ghi = (((g + (2 * h) + i + 2) / 4) & 0xFF) as base.u8
+        fgh = (((f + (2 * g) + h + 2) / 4) & 0xFF) as base.u8
+        efg = (((e + (2 * f) + g + 2) / 4) & 0xFF) as base.u8
+        def = (((d + (2 * e) + f + 2) / 4) & 0xFF) as base.u8
+        cde = (((c + (2 * d) + e + 2) / 4) & 0xFF) as base.u8
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = bc
+        this.yuv_cache[cachey + 0][cachex + 1] = cd
+        this.yuv_cache[cachey + 0][cachex + 2] = de
+        this.yuv_cache[cachey + 0][cachex + 3] = ef
+
+        this.yuv_cache[cachey + 1][cachex + 0] = bcd
+        this.yuv_cache[cachey + 1][cachex + 1] = cde
+        this.yuv_cache[cachey + 1][cachex + 2] = def
+        this.yuv_cache[cachey + 1][cachex + 3] = efg
+
+        this.yuv_cache[cachey + 2][cachex + 0] = cd
+        this.yuv_cache[cachey + 2][cachex + 1] = de
+        this.yuv_cache[cachey + 2][cachex + 2] = ef
+        this.yuv_cache[cachey + 2][cachex + 3] = fgh
+
+        this.yuv_cache[cachey + 3][cachex + 0] = cde
+        this.yuv_cache[cachey + 3][cachex + 1] = def
+        this.yuv_cache[cachey + 3][cachex + 2] = efg
+        this.yuv_cache[cachey + 3][cachex + 3] = ghi
+
+    } else if mode == 8 {  // HD.
+        s = this.yuv_cache[cachey + 3][cachex - 1] as base.u32
+        r = this.yuv_cache[cachey + 2][cachex - 1] as base.u32
+        q = this.yuv_cache[cachey + 1][cachex - 1] as base.u32
+        p = this.yuv_cache[cachey + 0][cachex - 1] as base.u32
+        a = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        b = this.yuv_cache[cachey - 1][cachex + 0] as base.u32
+        c = this.yuv_cache[cachey - 1][cachex + 1] as base.u32
+        d = this.yuv_cache[cachey - 1][cachex + 2] as base.u32
+
+        sr = (((s + r + 1) / 2) & 0xFF) as base.u8
+        rq = (((r + q + 1) / 2) & 0xFF) as base.u8
+        qp = (((q + p + 1) / 2) & 0xFF) as base.u8
+        pa = (((p + a + 1) / 2) & 0xFF) as base.u8
+
+        bcd = (((b + (2 * c) + d + 2) / 4) & 0xFF) as base.u8
+        abc = (((a + (2 * b) + c + 2) / 4) & 0xFF) as base.u8
+        pab = (((p + (2 * a) + b + 2) / 4) & 0xFF) as base.u8
+        qpa = (((q + (2 * p) + a + 2) / 4) & 0xFF) as base.u8
+        rqp = (((r + (2 * q) + p + 2) / 4) & 0xFF) as base.u8
+        srq = (((s + (2 * r) + q + 2) / 4) & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = pa
+        this.yuv_cache[cachey + 0][cachex + 1] = pab
+        this.yuv_cache[cachey + 0][cachex + 2] = abc
+        this.yuv_cache[cachey + 0][cachex + 3] = bcd
+
+        this.yuv_cache[cachey + 1][cachex + 0] = qp
+        this.yuv_cache[cachey + 1][cachex + 1] = qpa
+        this.yuv_cache[cachey + 1][cachex + 2] = pa
+        this.yuv_cache[cachey + 1][cachex + 3] = pab
+
+        this.yuv_cache[cachey + 2][cachex + 0] = rq
+        this.yuv_cache[cachey + 2][cachex + 1] = rqp
+        this.yuv_cache[cachey + 2][cachex + 2] = qp
+        this.yuv_cache[cachey + 2][cachex + 3] = qpa
+
+        this.yuv_cache[cachey + 3][cachex + 0] = sr
+        this.yuv_cache[cachey + 3][cachex + 1] = srq
+        this.yuv_cache[cachey + 3][cachex + 2] = rq
+        this.yuv_cache[cachey + 3][cachex + 3] = rqp
+
+    } else {  // HU.
+        s = this.yuv_cache[cachey + 3][cachex - 1] as base.u32
+        r = this.yuv_cache[cachey + 2][cachex - 1] as base.u32
+        q = this.yuv_cache[cachey + 1][cachex - 1] as base.u32
+        p = this.yuv_cache[cachey + 0][cachex - 1] as base.u32
+
+        sr = (((s + r + 1) / 2) & 0xFF) as base.u8
+        rq = (((r + q + 1) / 2) & 0xFF) as base.u8
+        qp = (((q + p + 1) / 2) & 0xFF) as base.u8
+
+        rqp = (((r + (2 * q) + p + 2) / 4) & 0xFF) as base.u8
+        srq = (((s + (2 * r) + q + 2) / 4) & 0xFF) as base.u8
+        ssr = (((s + (2 * s) + r + 2) / 4) & 0xFF) as base.u8
+        sss = (s & 0xFF) as base.u8
+
+        this.yuv_cache[cachey + 0][cachex + 0] = qp
+        this.yuv_cache[cachey + 0][cachex + 1] = rqp
+        this.yuv_cache[cachey + 0][cachex + 2] = rq
+        this.yuv_cache[cachey + 0][cachex + 3] = srq
+
+        this.yuv_cache[cachey + 1][cachex + 0] = rq
+        this.yuv_cache[cachey + 1][cachex + 1] = srq
+        this.yuv_cache[cachey + 1][cachex + 2] = sr
+        this.yuv_cache[cachey + 1][cachex + 3] = ssr
+
+        this.yuv_cache[cachey + 2][cachex + 0] = sr
+        this.yuv_cache[cachey + 2][cachex + 1] = ssr
+        this.yuv_cache[cachey + 2][cachex + 2] = sss
+        this.yuv_cache[cachey + 2][cachex + 3] = sss
+
+        this.yuv_cache[cachey + 3][cachex + 0] = sss
+        this.yuv_cache[cachey + 3][cachex + 1] = sss
+        this.yuv_cache[cachey + 3][cachex + 2] = sss
+        this.yuv_cache[cachey + 3][cachex + 3] = sss
+    }
+}
+
+pri func decoder.predict_y16!(mode: base.u32[..= 12]) {
+    var x : base.u32
+    var y : base.u32
+    var z : base.u32
+
+    var avg : base.u8
+    var val : base.u8
+
+    var tm0 : base.u32
+    var tm1 : base.u32
+    var tm2 : base.u32
+
+    if args.mode == 0 {  // DC.
+        avg = ((16 +
+                (this.yuv_cache[0x00][0x08] as base.u32) +
+                (this.yuv_cache[0x00][0x09] as base.u32) +
+                (this.yuv_cache[0x00][0x0A] as base.u32) +
+                (this.yuv_cache[0x00][0x0B] as base.u32) +
+                (this.yuv_cache[0x00][0x0C] as base.u32) +
+                (this.yuv_cache[0x00][0x0D] as base.u32) +
+                (this.yuv_cache[0x00][0x0E] as base.u32) +
+                (this.yuv_cache[0x00][0x0F] as base.u32) +
+                (this.yuv_cache[0x00][0x10] as base.u32) +
+                (this.yuv_cache[0x00][0x11] as base.u32) +
+                (this.yuv_cache[0x00][0x12] as base.u32) +
+                (this.yuv_cache[0x00][0x13] as base.u32) +
+                (this.yuv_cache[0x00][0x14] as base.u32) +
+                (this.yuv_cache[0x00][0x15] as base.u32) +
+                (this.yuv_cache[0x00][0x16] as base.u32) +
+                (this.yuv_cache[0x00][0x17] as base.u32) +
+                (this.yuv_cache[0x01][0x07] as base.u32) +
+                (this.yuv_cache[0x02][0x07] as base.u32) +
+                (this.yuv_cache[0x03][0x07] as base.u32) +
+                (this.yuv_cache[0x04][0x07] as base.u32) +
+                (this.yuv_cache[0x05][0x07] as base.u32) +
+                (this.yuv_cache[0x06][0x07] as base.u32) +
+                (this.yuv_cache[0x07][0x07] as base.u32) +
+                (this.yuv_cache[0x08][0x07] as base.u32) +
+                (this.yuv_cache[0x09][0x07] as base.u32) +
+                (this.yuv_cache[0x0A][0x07] as base.u32) +
+                (this.yuv_cache[0x0B][0x07] as base.u32) +
+                (this.yuv_cache[0x0C][0x07] as base.u32) +
+                (this.yuv_cache[0x0D][0x07] as base.u32) +
+                (this.yuv_cache[0x0E][0x07] as base.u32) +
+                (this.yuv_cache[0x0F][0x07] as base.u32) +
+                (this.yuv_cache[0x10][0x07] as base.u32)) / 32) as base.u8
+
+        z = 0
+        while z < 256 {
+            this.yuv_cache[0x01 + (z >> 4)][0x08 + (z & 15)] = avg
+            z += 1
+        }
+
+    } else if args.mode == 1 {  // TM.
+        tm0 = this.yuv_cache[0x00][0x07] as base.u32
+        z = 0
+        while z < 256 {
+            tm1 = this.yuv_cache[0x01 + (z >> 4)][0x07] as base.u32
+            tm2 = this.yuv_cache[0x00][0x08 + (z & 15)] as base.u32
+            this.yuv_cache[0x01 + (z >> 4)][0x08 + (z & 15)] =
+                    CLAMP[((tm1 + tm2) ~mod- tm0) & 1023]
+            z += 1
+        }
+
+    } else if args.mode == 2 {  // VE.
+        x = 0
+        while x < 16 {
+            val = this.yuv_cache[0x00][0x08 + x]
+            y = 0
+            while y < 16,
+                    inv x < 16,
+            {
+                this.yuv_cache[0x01 + y][0x08 + x] = val
+                y += 1
+            }
+            x += 1
+        }
+
+    } else if args.mode == 3 {  // HE.
+        y = 0
+        while y < 16 {
+            val = this.yuv_cache[0x01 + y][0x07]
+            x = 0
+            while x < 16,
+                    inv y < 16,
+            {
+                this.yuv_cache[0x01 + y][0x08 + x] = val
+                x += 1
+            }
+            y += 1
+        }
+
+    } else if args.mode <= 10 {  // DCTop.
+        avg = ((8 +
+                (this.yuv_cache[0x01][0x07] as base.u32) +
+                (this.yuv_cache[0x02][0x07] as base.u32) +
+                (this.yuv_cache[0x03][0x07] as base.u32) +
+                (this.yuv_cache[0x04][0x07] as base.u32) +
+                (this.yuv_cache[0x05][0x07] as base.u32) +
+                (this.yuv_cache[0x06][0x07] as base.u32) +
+                (this.yuv_cache[0x07][0x07] as base.u32) +
+                (this.yuv_cache[0x08][0x07] as base.u32) +
+                (this.yuv_cache[0x09][0x07] as base.u32) +
+                (this.yuv_cache[0x0A][0x07] as base.u32) +
+                (this.yuv_cache[0x0B][0x07] as base.u32) +
+                (this.yuv_cache[0x0C][0x07] as base.u32) +
+                (this.yuv_cache[0x0D][0x07] as base.u32) +
+                (this.yuv_cache[0x0E][0x07] as base.u32) +
+                (this.yuv_cache[0x0F][0x07] as base.u32) +
+                (this.yuv_cache[0x10][0x07] as base.u32)) / 16) as base.u8
+
+        z = 0
+        while z < 256 {
+            this.yuv_cache[0x01 + (z >> 4)][0x08 + (z & 15)] = avg
+            z += 1
+        }
+
+    } else if args.mode == 11 {  // DCLeft.
+        avg = ((8 +
+                (this.yuv_cache[0x00][0x08] as base.u32) +
+                (this.yuv_cache[0x00][0x09] as base.u32) +
+                (this.yuv_cache[0x00][0x0A] as base.u32) +
+                (this.yuv_cache[0x00][0x0B] as base.u32) +
+                (this.yuv_cache[0x00][0x0C] as base.u32) +
+                (this.yuv_cache[0x00][0x0D] as base.u32) +
+                (this.yuv_cache[0x00][0x0E] as base.u32) +
+                (this.yuv_cache[0x00][0x0F] as base.u32) +
+                (this.yuv_cache[0x00][0x10] as base.u32) +
+                (this.yuv_cache[0x00][0x11] as base.u32) +
+                (this.yuv_cache[0x00][0x12] as base.u32) +
+                (this.yuv_cache[0x00][0x13] as base.u32) +
+                (this.yuv_cache[0x00][0x14] as base.u32) +
+                (this.yuv_cache[0x00][0x15] as base.u32) +
+                (this.yuv_cache[0x00][0x16] as base.u32) +
+                (this.yuv_cache[0x00][0x17] as base.u32)) / 16) as base.u8
+
+        z = 0
+        while z < 256 {
+            this.yuv_cache[0x01 + (z >> 4)][0x08 + (z & 15)] = avg
+            z += 1
+        }
+
+    } else {  // DCTopLeft.
+        z = 0
+        while z < 256 {
+            this.yuv_cache[0x01 + (z >> 4)][0x08 + (z & 15)] = 0x80
+            z += 1
+        }
+    }
+}
+
+pri func decoder.predict_uv8!(b: base.u32[..= 1], mode: base.u32[..= 12]) {
+    var cachey : base.u32[..= 18]
+    var cachex : base.u32[..= 24]
+    var x      : base.u32
+    var y      : base.u32
+    var z      : base.u32
+
+    var avg : base.u8
+    var val : base.u8
+
+    var tm0 : base.u32
+    var tm1 : base.u32
+    var tm2 : base.u32
+
+    cachey = 0x12
+    cachex = (args.b * 16) + 8
+
+    if args.mode == 0 {  // DC.
+        avg = ((8 +
+                (this.yuv_cache[cachey - 1][cachex + 0] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 1] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 2] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 3] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 4] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 5] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 6] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 7] as base.u32) +
+                (this.yuv_cache[cachey + 0][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 1][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 2][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 3][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 4][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 5][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 6][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 7][cachex - 1] as base.u32)) / 16) as base.u8
+
+        z = 0
+        while z < 64 {
+            this.yuv_cache[cachey + (z >> 3)][cachex + (z & 7)] = avg
+            z += 1
+        }
+
+    } else if args.mode == 1 {  // TM.
+        tm0 = this.yuv_cache[cachey - 1][cachex - 1] as base.u32
+        z = 0
+        while z < 64,
+                inv cachey == 0x12,
+                inv cachex >= 8,
+        {
+            tm1 = this.yuv_cache[cachey + (z >> 3)][cachex - 1] as base.u32
+            tm2 = this.yuv_cache[cachey - 1][cachex + (z & 7)] as base.u32
+            this.yuv_cache[cachey + (z >> 3)][cachex + (z & 7)] =
+                    CLAMP[((tm1 + tm2) ~mod- tm0) & 1023]
+            z += 1
+        }
+
+    } else if args.mode == 2 {  // VE.
+        x = 0
+        while x < 8,
+                inv cachey == 0x12,
+                inv cachex >= 8,
+        {
+            val = this.yuv_cache[cachey - 1][cachex + x]
+            y = 0
+            while y < 8,
+                    inv cachey == 0x12,
+                    inv cachex >= 8,
+                    inv x < 8,
+            {
+                this.yuv_cache[cachey + y][cachex + x] = val
+                y += 1
+            }
+            x += 1
+        }
+
+    } else if args.mode == 3 {  // HE.
+        y = 0
+        while y < 8,
+                inv cachey == 0x12,
+                inv cachex >= 8,
+        {
+            val = this.yuv_cache[cachey + y][cachex - 1]
+            x = 0
+            while x < 8,
+                    inv cachey == 0x12,
+                    inv cachex >= 8,
+                    inv y < 8,
+            {
+                this.yuv_cache[cachey + y][cachex + x] = val
+                x += 1
+            }
+            y += 1
+        }
+
+    } else if args.mode <= 10 {  // DCTop.
+        avg = ((4 +
+                (this.yuv_cache[cachey + 0][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 1][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 2][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 3][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 4][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 5][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 6][cachex - 1] as base.u32) +
+                (this.yuv_cache[cachey + 7][cachex - 1] as base.u32)) / 8) as base.u8
+
+        z = 0
+        while z < 64 {
+            this.yuv_cache[cachey + (z >> 3)][cachex + (z & 7)] = avg
+            z += 1
+        }
+
+    } else if args.mode == 11 {  // DCLeft.
+        avg = ((4 +
+                (this.yuv_cache[cachey - 1][cachex + 0] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 1] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 2] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 3] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 4] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 5] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 6] as base.u32) +
+                (this.yuv_cache[cachey - 1][cachex + 7] as base.u32)) / 8) as base.u8
+
+        z = 0
+        while z < 64 {
+            this.yuv_cache[cachey + (z >> 3)][cachex + (z & 7)] = avg
+            z += 1
+        }
+
+    } else {  // DCTopLeft.
+        z = 0
+        while z < 64 {
+            this.yuv_cache[cachey + (z >> 3)][cachex + (z & 7)] = 0x80
+            z += 1
+        }
+    }
+}
