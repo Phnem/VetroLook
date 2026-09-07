@@ -17,8 +17,6 @@
 
 <br>
 
-<img src="docs/assets/hero.png" width="900" alt="VetroLook">
-
 </div>
 
 ---
@@ -150,12 +148,6 @@ RAW
 
 Folders containing supported images automatically appear in the library. Folder cards look like folders — a tab and body, not a flat photo stack — with a handful of the photos inside them fanned out and tucked into the opening.
 
-<div align="center">
-
-<img src="docs/assets/library.png" width="900" alt="VetroLook Library">
-
-</div>
-
 ### Folder Families
 
 Real filesystems can become messy:
@@ -197,12 +189,6 @@ Automatically detecting bursts (several near-identical shots taken seconds apart
 ## Image Information
 
 The floating Info panel provides technical information without covering the image with permanent UI.
-
-<div align="center">
-
-<img src="docs/assets/info.png" width="500" alt="VetroLook Info panel">
-
-</div>
 
 Available information includes:
 
