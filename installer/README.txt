@@ -1,5 +1,5 @@
 VetroLook
-Version 1.0.0
+Version 1.0.1
 Windows 10/11 x64
 
 Fast native image viewer and photo library for Windows.
@@ -37,7 +37,7 @@ Extract the archive and run VetroLook.exe.
 ## NOTES
 
 - Some HEIC/HEIF formats may depend on installed Windows codecs.
-- JPEG XL is not included in version 1.0.0.
+- JPEG XL is not included in version 1.0.1.
 - RAW decoding support depends on camera/file compatibility.
 - Initial Gallery indexing may take some time on very large libraries.
 - VetroLook does not upload your photo library to the cloud.
