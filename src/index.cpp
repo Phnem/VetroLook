@@ -401,6 +401,7 @@ bool LoadCache(){
   for(uint32_t j=0;j<photoCount&&file;j++){
    PhotoEntry photo;
    if(!readStr(photo.name)||!readStr(photo.ext))return false;
+   for(auto& c:photo.ext)c=towlower(c);
    if(!file.read((char*)&photo.size,8)||!file.read((char*)&photo.modified,8))return false;
    if(!file.read((char*)&photo.id,8))return false;
    photo.path=folderPath+L"\\"+photo.name;
@@ -644,9 +645,12 @@ std::vector<FolderEntry> IndexSnapshotFolders(){
  return out;
 }
 std::vector<PhotoEntry> IndexPhotosIn(const std::wstring& folder){
- std::wstring lower=NormalisePath(folder);
+ std::wstring norm=NormalisePath(folder);
+ std::wstring raw=folder;for(auto& c:raw)c=towlower(c);
+ while(raw.size()>3&&(raw.back()==L'\\'||raw.back()==L'/'))raw.pop_back();
  std::lock_guard lock(mx);
- auto found=photosByFolder.find(lower);
+ auto found=photosByFolder.find(norm);
+ if(found==photosByFolder.end()&&raw!=norm)found=photosByFolder.find(raw);
  return found==photosByFolder.end()?std::vector<PhotoEntry>():found->second;
 }
 std::wstring NormalisePath(const std::wstring& path){

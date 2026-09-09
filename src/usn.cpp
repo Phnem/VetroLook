@@ -184,6 +184,7 @@ bool UsnFastEnumerate(wchar_t driveLetter,const UsnFolderSink& sink,UsnJournalPo
    photo.path=full;photo.name=pp.name;
    auto dot=pp.name.find_last_of(L'.');
    photo.ext=dot==std::wstring::npos?L"":pp.name.substr(dot+1);
+   for(auto& c:photo.ext)c=towlower(c);
    photo.size=(uint64_t(fad.nFileSizeHigh)<<32)|fad.nFileSizeLow;
    photo.modified=(uint64_t(fad.ftLastWriteTime.dwHighDateTime)<<32)|fad.ftLastWriteTime.dwLowDateTime;
    photo.id=IdFromFrn(volSerial,pp.frn);

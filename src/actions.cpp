@@ -119,12 +119,3 @@ bool CopyToClipboard(HWND owner,const Image& image,const std::wstring& path){
  CloseClipboard();
  return ok;
 }
-static const wchar_t* FavouriteKey=L"Software\\VetroLook\\Favourites";
-bool FavouriteGet(const std::wstring& path){
- DWORD value=0,size=sizeof(value);
- return RegGetValueW(HKEY_CURRENT_USER,FavouriteKey,path.c_str(),RRF_RT_REG_DWORD,nullptr,&value,&size)==ERROR_SUCCESS&&value;
-}
-void FavouriteSet(const std::wstring& path,bool on){
- if(on){DWORD value=1;RegSetKeyValueW(HKEY_CURRENT_USER,FavouriteKey,path.c_str(),REG_DWORD,&value,sizeof(value));}
- else{HKEY key=nullptr;if(RegOpenKeyExW(HKEY_CURRENT_USER,FavouriteKey,0,KEY_SET_VALUE,&key)==ERROR_SUCCESS){RegDeleteValueW(key,path.c_str());RegCloseKey(key);}}
-}

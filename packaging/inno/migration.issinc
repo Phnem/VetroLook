@@ -1,0 +1,173 @@
+const
+  CustomUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\VetroLook';
+  InnoUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{E7F3A1C0-4B2D-4E6F-9A8B-1C2D3E4F5A6B}_is1';
+
+function SameText(const A, B: String): Boolean;
+begin
+  Result := CompareText(A, B) = 0;
+end;
+
+function NormalDir(Value: String): String;
+begin
+  Value := RemoveQuotes(Trim(Value));
+  while (Length(Value) > 3) and (Value[Length(Value)] = '\') do
+    Delete(Value, Length(Value), 1);
+  Result := Value;
+end;
+
+procedure SplitUninstallCommand(Value: String; var FileName, Parameters: String);
+var
+  ClosingQuote, Space: Integer;
+begin
+  FileName := '';
+  Parameters := '';
+  Value := Trim(Value);
+  if Value = '' then
+    exit;
+  if Value[1] = '"' then begin
+    ClosingQuote := Pos('"', Copy(Value, 2, Length(Value) - 1));
+    if ClosingQuote = 0 then
+      exit;
+    ClosingQuote := ClosingQuote + 1;
+    FileName := Copy(Value, 2, ClosingQuote - 2);
+    Parameters := Trim(Copy(Value, ClosingQuote + 1, Length(Value)));
+  end else begin
+    Space := Pos(' ', Value);
+    if Space = 0 then
+      FileName := Value
+    else begin
+      FileName := Copy(Value, 1, Space - 1);
+      Parameters := Trim(Copy(Value, Space + 1, Length(Value)));
+    end;
+  end;
+end;
+
+function InnoUninstallerName(const FileName: String): Boolean;
+var
+  Name, Number: String;
+begin
+  Name := Lowercase(ExtractFileName(FileName));
+  Result := False;
+  if (Length(Name) <> 12) or (Copy(Name, 1, 5) <> 'unins') or
+     (ExtractFileExt(Name) <> '.exe') then
+    exit;
+  Number := Copy(Name, 6, 3);
+  Result := (Number[1] >= '0') and (Number[1] <= '9') and
+    (Number[2] >= '0') and (Number[2] <= '9') and
+    (Number[3] >= '0') and (Number[3] <= '9');
+end;
+
+function AppendParam(const Existing, Value: String): String;
+begin
+  if Trim(Existing) = '' then
+    Result := Value
+  else
+    Result := Trim(Existing) + ' ' + Value;
+end;
+
+function HasCustomQuietFlag(const Parameters: String): Boolean;
+var
+  Value: String;
+begin
+  Value := Lowercase(' ' + Parameters + ' ');
+  Result := (Pos('/silent', Value) > 0) or (Pos('/verysilent', Value) > 0) or
+    (Pos('/quiet', Value) > 0);
+end;
+
+// Pure selection/validation routine shared with the fixture harness.  It will
+// not execute a registry command merely because its key happens to have a
+// familiar name: product identity, location and uninstaller path must all
+// match the historical VetroLook installers.
+function BuildMigrationPlan(IsCustom: Boolean; const ExpectedDir, DisplayName,
+  Publisher, InstallLocation, QuietUninstallString, UninstallString: String;
+  RequireExistingFile: Boolean; var FileName, Parameters: String): Boolean;
+var
+  Command, Expected: String;
+begin
+  Result := False;
+  FileName := '';
+  Parameters := '';
+  Expected := NormalDir(ExpectedDir);
+  if not SameText(Trim(DisplayName), 'VetroLook') then
+    exit;
+  if IsCustom and not SameText(Trim(Publisher), 'Phnem') then
+    exit;
+  if not SameText(NormalDir(InstallLocation), Expected) then
+    exit;
+
+  Command := Trim(QuietUninstallString);
+  if Command = '' then
+    Command := Trim(UninstallString);
+  SplitUninstallCommand(Command, FileName, Parameters);
+  if FileName = '' then
+    exit;
+  if not SameText(NormalDir(ExtractFileDir(FileName)), Expected) then
+    exit;
+  if IsCustom then begin
+    if not SameText(ExtractFileName(FileName), 'Uninstall.exe') then
+      exit;
+    if (Trim(QuietUninstallString) = '') and not HasCustomQuietFlag(Parameters) then
+      Parameters := AppendParam(Parameters, '/silent');
+  end else begin
+    if not InnoUninstallerName(FileName) then
+      exit;
+    if Trim(QuietUninstallString) = '' then begin
+      Parameters := AppendParam(Parameters, '/VERYSILENT');
+      Parameters := AppendParam(Parameters, '/SUPPRESSMSGBOXES');
+      Parameters := AppendParam(Parameters, '/NORESTART');
+    end;
+  end;
+  if RequireExistingFile and not FileExists(FileName) then begin
+    FileName := '';
+    Parameters := '';
+    exit;
+  end;
+  Result := True;
+end;
+
+function ReadMigrationPlan(const Key: String; IsCustom: Boolean;
+  var FileName, Parameters, Location: String): Boolean;
+var
+  DisplayName, Publisher, QuietCommand, Command: String;
+begin
+  DisplayName := '';
+  Publisher := '';
+  Location := '';
+  QuietCommand := '';
+  Command := '';
+  RegQueryStringValue(HKEY_CURRENT_USER, Key, 'DisplayName', DisplayName);
+  RegQueryStringValue(HKEY_CURRENT_USER, Key, 'Publisher', Publisher);
+  RegQueryStringValue(HKEY_CURRENT_USER, Key, 'InstallLocation', Location);
+  RegQueryStringValue(HKEY_CURRENT_USER, Key, 'QuietUninstallString', QuietCommand);
+  RegQueryStringValue(HKEY_CURRENT_USER, Key, 'UninstallString', Command);
+  Result := BuildMigrationPlan(IsCustom,
+    ExpandConstant('{localappdata}\Programs\VetroLook'), DisplayName, Publisher,
+    Location, QuietCommand, Command, True, FileName, Parameters);
+end;
+
+function RunPreviousUninstaller(const Kind, FileName, Parameters, Location: String): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  Log('VetroLook: removing previous ' + Kind + ' installation with: ' + FileName + ' ' + Parameters);
+  if not Exec(FileName, Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then begin
+    Result := 'Could not start the previous VetroLook uninstaller. Setup was stopped to avoid leaving two installations.';
+    Log('VetroLook: ' + Result);
+  end else if ResultCode <> 0 then begin
+    Result := 'The previous VetroLook uninstaller failed (exit code ' + IntToStr(ResultCode) + '). Setup was stopped.';
+    Log('VetroLook: ' + Result);
+  end else if FileExists(AddBackslash(Location) + 'VetroLook.exe') then
+    Log('VetroLook: previous uninstaller returned success but left application files in ' + Location);
+end;
+
+function MigrateRegisteredInstall(const Key, Kind: String; IsCustom: Boolean): String;
+var
+  FileName, Parameters, Location: String;
+begin
+  Result := '';
+  if ReadMigrationPlan(Key, IsCustom, FileName, Parameters, Location) then
+    Result := RunPreviousUninstaller(Kind, FileName, Parameters, Location)
+  else if RegKeyExists(HKEY_CURRENT_USER, Key) then
+    Log('VetroLook: ignored an uninstall entry that failed identity/path validation: ' + Key);
+end;

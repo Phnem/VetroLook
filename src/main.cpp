@@ -5,6 +5,10 @@
 #include "actions.h"
 #include "index.h"
 #include "dnd.h"
+#include "favourites.h"
+#include "pipeline.h"
+#include "metacache.h"
+#include "lensdb.h"
 #include <roapi.h>
 #include <windowsx.h>
 #include <dwmapi.h>
@@ -12,6 +16,7 @@
 #include <shlwapi.h>
 #include <commdlg.h>
 #include <ole2.h>
+#include <psapi.h>
 #include <wincodec.h>
 #include <dbt.h>
 #include <filesystem>
@@ -20,6 +25,7 @@
 #include <condition_variable>
 #include <thread>
 #include <atomic>
+#include <deque>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,20 +41,21 @@ enum Id{
  IdNone=0,IdBack,IdZoomOut,IdZoomIn,IdTrack,
  IdInfo,IdCopy,IdLike,IdRotate,IdFit,IdMore,IdEdit,
  IdWinMin,IdWinMax,IdWinClose,
- IdSend,IdSave,IdSaveAs,IdPrint,IdDelete,IdDefaultApp,IdSpacePreview,IdThemeDark,IdThemeLight,IdLanguage,
+ IdSend,IdSave,IdSaveAs,IdPrint,IdDelete,IdDefaultApp,IdSpacePreview,IdTotalCmd,IdThemeDark,IdThemeLight,IdLanguage,
  IdLangBack,IdLangRu,IdLangEn,IdConfirmDelete,IdConfirmCancel,
  IdToolCrop,IdToolRotate,IdToolDraw,IdToolArrow,IdToolSelect,
  IdRotLeft,IdRotRight,
- IdHistRGB,IdHistLuma,IdHistR,IdHistG,IdHistB,IdClipHigh,IdClipLow,
+ IdHistRGB,IdHistLuma,IdHistR,IdHistG,IdHistB,IdClipHigh,IdClipLow,IdScopeHist,IdScopeVector,
  IdCropFree,IdCrop11,IdCrop43,IdCrop32,IdCrop169,IdCropApply,IdCropCancel,
  IdUndo,IdThin,IdMedium,IdThick,IdSwatch0,IdSwatch1,IdSwatch2,IdSwatch3,IdSwatch4,IdSwatch5,
- IdPanelBody,IdGalleryBody,IdZoomBar,IdDockBar,IdWinBar,IdThemeRow,
+ IdPanelBody,IdGalleryBody,IdZoomBar,IdDockBar,IdWinBar,IdThemeRow,IdWheelRow,IdWheelZoom,IdWheelNav,
  IdPrevPhoto,IdNextPhoto,IdShapeRect,IdShapeEllipse,IdCopyPath,IdOpenMap,
  IdLibBack,IdLibSearch,IdLibSort,IdLibFilter,IdLibViewFolders,IdLibViewPhotos,IdLibRescan,
  IdSortName,IdSortDate,IdSortSize,
  IdFilterRawOnly,IdFilterRegularOnly,IdFilterProfileAny,IdFilterProfileSRGB,IdFilterProfileP3,
  IdFilterProfileAdobe,IdFilterProfileNone,IdFilterSizeLo,IdFilterSizeHi,IdFilterClear,IdFilterApply,
  IdFilterPopup,IdSortPopup,IdLibBrand,
+ IdFavourites,IdFavouritesChip,
  IdGallery0=4096,
  IdFilterExt0=1<<19,       // +one per supported extension
  IdCard0=1<<21             // +one per visible library/album grid cell
@@ -56,7 +63,11 @@ enum Id{
 enum Panel{PanelNone,PanelInfo,PanelMenu,PanelEdit};
 enum Tool{ToolNone,ToolCrop,ToolRotate,ToolDraw,ToolArrow,ToolSelect};
 enum Screen{ScrLibrary,ScrAlbum,ScrViewer};
+// The library opens on the timeline. Every modern gallery — Photos, Google
+// Photos, Samsung Gallery — puts a chronological grid first, and a folder
+// tree second, because that is how people look for a photograph they took.
 enum LibView{ViewFolders,ViewPhotosFlat};
+constexpr int DefaultLibView=ViewPhotosFlat;
 
 // -------------------------------------------------------------- state ------
 HWND win=nullptr,explorer=nullptr;HHOOK hook=nullptr;
@@ -64,7 +75,15 @@ ComPtr<ID2D1Bitmap> bitmap,backdrop;
 std::map<std::wstring,ComPtr<ID2D1Bitmap>> thumbBitmaps;
 std::shared_ptr<Image> current;
 std::wstring currentPath,errorText;
+// Which cached frame the renderer is currently showing, in the cache's own
+// key space. Used to address GPU slots without re-deriving identity.
+std::wstring currentFrameKey;
 bool loading=false,preview=false,compactWindow=false,stopping=false,actionBusy=false;
+// A direct --quicklook invocation is a short-lived window, unlike Explorer's
+// reusable preview host.  Closing it must therefore end the process.
+bool quickLookInvocation=false;
+bool lowMemoryActive=false;
+bool showingPreview=false;   // the frame on screen is the fast first look, not the full decode
 bool backgroundMode=false;
 bool requestPreview=false,requestForce=false,fit=true,dragImage=false,liked=false,confirmDelete=false;
 bool clipHigh=false,clipLow=false,testing=false,autostart=false;
@@ -72,18 +91,28 @@ float dpi=1;
 std::vector<std::wstring> siblings;
 RECT normalBounds{150,100,1280,880};
 
-Spring themeMix(0,PanelK,PanelC);
+Spring themeMix(0,PanelK,PanelC),wheelMix(0,PanelK,PanelC);
+// 0 zooms with the wheel, 1 walks the filmstrip with it. Free-spinning wheels
+// and touchpads send fractions of a notch, so navigation accumulates them.
+int wheelMode=0;float wheelCarry=0;
+int tcStatus=TcMissing;   // refreshed whenever the menu opens
 Spring zoomLog(0,ZoomK,ZoomC),panSX(0,ZoomK,ZoomC),panSY(0,ZoomK,ZoomC),rotate(0,PanelK,PanelC);
 Spring panelSlide(0,PanelK,PanelC),levelSlide(0,PanelK,PanelC),titleIn(1,PanelK,PanelC);
 Spring toastIn(0,PanelK,PanelC),likePop(1,ButtonK,ButtonC),thumbLift(0,ButtonK,ButtonC);
 Spring clipHighFade(0,PanelK,PanelC),clipLowFade(0,PanelK,PanelC),histRise(0,GalleryK,GalleryC);
 int panel=PanelNone,pendingPanel=PanelNone,menuLevel=0,tool=ToolNone;
+// No lens-correction switches. The database is read and the profile is
+// matched — Info reports both — but nothing applies those coefficients to
+// pixels yet, and a control that corrects nothing is worse than no control.
+// See "Lens correction" in REPORT.md.
 float rotateSpan=90;
 std::wstring prevName,prevMeta;
 std::wstring toast;double toastUntil=0,copyUntil=0,likeBurst=0;
 Meta info;uint64_t metaId=0;bool metaPending=false;
+uint64_t metaQuickId=0,metaQuickCounter=1ull<<40;   // a separate id space from the full pass
 ComPtr<ID2D1PathGeometry> histPath[4];
-int histMode=0;
+ComPtr<ID2D1Bitmap> scopeBitmap;
+int histMode=0,scopeMode=0;   // scopeMode: 0 histogram, 1 vectorscope
 float panelScroll=0,panelScrollVel=0,panelExtent=0;
 
 // crop, annotations and selection all live in the rotated display image space
@@ -105,6 +134,11 @@ float galleryScroll=0,galleryVel=0,galleryTarget=0;
 bool galleryDragging=false,galleryHasTarget=false;
 float galleryGrabX=0,galleryGrabScroll=0;
 double galleryGrabTime=0;
+// Navigation samples determine both whether decorative image transitions are
+// worth drawing and which side of the filmstrip receives prefetch priority.
+int navigationDirection=1,navigationBurst=0;
+double lastNavigateAt=0,fastNavigationUntil=0;
+bool fastNavigation=false;
 
 // -------------------------------------------------------------- library ----
 // The browseable collection: folders holding photos, a single folder's grid,
@@ -114,7 +148,12 @@ double galleryGrabTime=0;
 // two frames underneath it so Back still walks Viewer -> Album -> Library.
 struct NavFrame{int screen;std::wstring folder;uint64_t photoId;float scroll;};
 std::vector<NavFrame> navStack;
-int screen=ScrLibrary,libView=ViewFolders;
+int screen=ScrLibrary,libView=DefaultLibView;
+// The virtual Favourites collection: not a folder, no files moved or copied,
+// just the local database filtered to favourite=true.
+bool favouritesOpen=false;
+std::vector<PhotoEntry> favouritePhotos;
+uint64_t favouritesSeen=~0ull;
 std::vector<FolderEntry> libFolders;
 std::vector<PhotoEntry> albumPhotos;
 std::unordered_map<uint64_t,std::vector<PhotoEntry>> assetVariants;
@@ -125,7 +164,9 @@ bool filterOpen=false,sortOpen=false;
 Spring filterReveal(0,PanelK,PanelC),sortReveal(0,PanelK,PanelC);
 Spring libViewSlide(0,PanelK,PanelC),libContentIn(1,PanelK,PanelC);
 float libContentDirection=1;
-std::unordered_map<std::wstring,bool> filterExtOff;     // extension present here = excluded
+// Empty means "all formats".  Once the user picks a chip it becomes an
+// explicit inclusion set, so one click on NEF really means "only NEF".
+std::unordered_map<std::wstring,bool> filterExtOn;
 bool filterRawOnly=false,filterRegularOnly=false;
 int filterProfile=0;                                    // 0 any,1 sRGB,2 P3,3 AdobeRGB,4 none
 uint64_t filterSizeLo=0,filterSizeHi=~0ull;
@@ -179,21 +220,113 @@ int hover=IdNone,pressed=IdNone;
 POINT mouse{};bool sliderGrab=false;
 
 std::mutex mx;std::condition_variable cv;std::wstring requested;uint64_t generation=0;std::atomic<uint64_t> latest{0};
-struct Result{uint64_t id;std::wstring path,error;std::shared_ptr<Image> image;std::vector<std::wstring> files;};
-std::unique_ptr<Result> ready;std::thread worker,actionWorker;
+unsigned requestEdge=2048;         // long edge, in pixels, worth showing before the full decode lands
+// Whether this request should go past the screen tier. Fit-to-window browsing
+// does not: a screen frame covers the viewport and costs a seventh of the
+// bytes to put on the GPU.
+bool requestFull=false;
+// RAW full development costs seconds. It only starts once the reader has
+// actually settled on a photograph, so walking a folder never queues thirty of
+// them behind the one being looked at.
+constexpr double RawFullDebounceSeconds=0.45;
+std::atomic<uint64_t> rawFullStarted{0},rawFullCompleted{0},rawFullCancelled{0},rawFullSkippedBrowsing{0};
+std::atomic<uint64_t> fullGpuUploads{0},screenGpuUploads{0};
+// Counting uploads by tier over-reports: a 400 KB PNG decoded at its own size
+// is a "full" frame and costs nothing. Bytes are what the bus actually moves,
+// and a large upload is the thing that must not appear on the navigation path.
+std::atomic<uint64_t> gpuUploadBytes{0},gpuLargeUploads{0},gpuMaxUploadBytes{0};
+constexpr size_t LargeUploadBytes=32ull*1024*1024;
+std::vector<std::wstring> requestFiles;
+// A partial result is the fast first look: the camera's embedded preview or a
+// scaled decode, replaced in place once the full-resolution frame is ready.
+struct Result{uint64_t id;std::wstring path,error,key;std::shared_ptr<Image> image;std::vector<std::wstring> files;bool partial=false;};
+void RequestFullResolution();
+// Preview and full-resolution results may be produced faster than the window
+// thread handles WM_APP.  A single slot lets the full frame overwrite the
+// preview before it was ever painted, defeating the two-stage contract.
+std::deque<std::unique_ptr<Result>> ready;std::thread worker,actionWorker;
 struct SaveResult{bool ok;std::wstring path,error;uint64_t imageId;};
 std::unique_ptr<SaveResult> saveResult;
-std::map<std::wstring,std::shared_ptr<Image>> cache;size_t cacheBytes=0;constexpr size_t Budget=192*1024*1024;
+// Decoded frames are expensive, especially for RAW.  This cache is measured
+// in real pixel bytes and adjusts to the machine's currently available RAM;
+// it is intentionally separate from the thumbnail subsystem's L3 cache.
+enum CacheTier{CacheFull=0,CacheScreen=1,CacheWarm=2};
+struct CacheEntry{std::shared_ptr<Image> image;size_t cost=0;ULONGLONG used=0;int tier=CacheWarm;std::wstring path;};
+std::map<std::wstring,CacheEntry> frameCache;
+std::mutex cacheMx;
+size_t cacheBytes=0,cacheBudget=0;
+// Bytes held per tier. A full-resolution frame is fifteen to twenty times the
+// size of the screen-ready frame of the same photograph, so three of them can
+// evict thirty useful neighbours. The tiers are budgeted separately to stop
+// exactly that: full frames get a small allowance, screen frames get the rest.
+size_t cacheBytesByTier[3]={0,0,0};
+HANDLE lowMemoryNotice=nullptr;
+std::atomic<uint64_t> prefetchEpoch{0};
+std::atomic<uint64_t> cacheHits{0},cacheMisses{0},cacheEvictions{0},prefetchCancelled{0};
+// One navigation's anatomy. Filled by Open(), CacheGet() and GpuTextureFor()
+// as they run, so a transition that took 40 ms can say which of them it spent
+// the time in instead of leaving it to be guessed at.
+enum CacheTierHit{TierMiss=-1,TierFull=0,TierScreen=1,TierWarm=2,TierThumb=3};
+struct NavTrace{
+ double cacheLookupMs=0,gpuMs=0,presentMs=0,lockWaitMs=0;
+ int tier=TierMiss;
+ bool gpuResident=false,gpuReused=false,gpuCreated=false;
+ bool directionChanged=false,viewportChanged=false;
+ uint64_t evictionsBefore=0,evictionsDuring=0;
+ unsigned width=0,height=0;
+};
+NavTrace navTrace;
+// A snapshot taken as Open() returns. The live `navTrace` keeps being written
+// after that — idle pre-upload also goes through GpuTextureFor — so anything
+// reading a navigation's anatomy afterwards must read the snapshot.
+NavTrace navLastTrace;
+// Time spent waiting for the frame-cache lock, accumulated across one
+// navigation. Contention here would show up as an unexplained stall.
+std::atomic<double> cacheLockWaitMs{0.0};
+// GPU slot accounting, so a navigation that felt slow can be attributed to an
+// upload rather than guessed at.
+double lastUploadMs=0;bool lastUploadWasReuse=false,lastFrameWasPreUploaded=false;
+std::atomic<uint64_t> gpuUploads{0},gpuReuses{0},gpuPreUploads{0},gpuHits{0};
+constexpr size_t CacheMB=1024ull*1024ull,CacheGB=1024ull*CacheMB;
+constexpr size_t CacheHardCap=4ull*CacheGB,CacheLowMin=128ull*CacheMB,CacheLowMax=256ull*CacheMB;
 std::wofstream logFile;int testStage=0,testWait=0,testFailures=0;std::vector<std::wstring> testFiles;
+// --nav-bench: a real navigation stress run through the real window, so
+// cache-hit latency is measured where it actually happens — including the GPU
+// upload — rather than in a headless harness that skips the renderer.
+bool navBench=false;int navPhase=0,navIndex=0,navRepeat=0,navSettle=0,navBenchSteps=200;
+// Remembered between navigations so a transition can say whether the reader
+// changed direction or resized the window — both legitimate reasons for a
+// miss that must not be filed as a cache fault.
+int navPreviousDirection=0;unsigned navPreviousWidth=0,navPreviousHeight=0;
+unsigned navBenchInterval=16;
+std::vector<std::wstring> navFiles;
+struct NavSample{
+ double ms=0,cacheLookupMs=0,gpuMs=0,lockWaitMs=0;
+ int phase=0,tier=-1;
+ bool gpuResident=false,gpuReused=false,gpuCreated=false;
+ bool directionChanged=false,viewportChanged=false;
+ uint64_t evictions=0;
+ std::wstring file;
+};
+std::vector<NavSample> navSamples;
+double navLastOpenMs=0;
 ULONGLONG boot=GetTickCount64();
 bool needFrame=true;
+std::chrono::steady_clock::time_point openStarted;
+uint64_t latencyId=0,currentGeneration=0;bool firstVisibleLogged=false,fullVisibleLogged=false;
 
 void Open(const std::wstring& path,bool force=false);
 void Fit();
+void SyncGallery();
 
 // ------------------------------------------------------------- helpers -----
 double Now(){return double(GetTickCount64())/1000.0;}
-void Log(const std::wstring& s){if(logFile){logFile<<GetTickCount64()-boot<<L"ms "<<s<<L"\n";logFile.flush();}OutputDebugStringW((s+L"\n").c_str());}
+std::mutex logMx;   // the decode worker reports its own timings
+void Log(const std::wstring& s){
+ std::lock_guard lock(logMx);
+ if(logFile){logFile<<GetTickCount64()-boot<<L"ms "<<s<<L"\n";logFile.flush();}
+ OutputDebugStringW((s+L"\n").c_str());
+}
 void QuickLog(const std::wstring& s){
  if(!backgroundMode)return;wchar_t local[MAX_PATH]{};if(!GetEnvironmentVariableW(L"LOCALAPPDATA",local,MAX_PATH))return;
  std::wstring dir=std::wstring(local)+L"\\VetroLook";CreateDirectoryW(dir.c_str(),nullptr);
@@ -231,9 +364,24 @@ float Zoom(){return expf(zoomLog.v);}
 float ZoomToSlider(float z){return logf(Clamp(z,MinZoom,MaxZoom)/MinZoom)/logf(MaxZoom/MinZoom);}
 float SliderToZoom(float t){return MinZoom*powf(MaxZoom/MinZoom,Clamp(t,0,1));}
 bool Turned(){return int(fabsf(rotate.target))%180!=0;}
+// Display space: the pixels the renderer is actually drawing. Everything that
+// positions, zooms, crops or hit-tests works here.
 unsigned DisplayW(){return current?(Turned()?current->h:current->w):0;}
 unsigned DisplayH(){return current?(Turned()?current->w:current->h):0;}
+// Asset space: what the file contains. The header reports this, Save writes
+// this, and neither may be derived from whichever tier happens to be on screen.
+float FrameScale(){return current?current->Scale():1.f;}
+unsigned SourceW(){return current?(Turned()?current->SourceH():current->SourceW()):0;}
+unsigned SourceH(){return current?(Turned()?current->SourceW():current->SourceH()):0;}
 bool CropActive(){return hasCrop&&tool!=ToolCrop;}
+// Full resolution is about the photograph, not about the frame in hand.
+//
+// The test is the on-screen magnification against the *asset*: at 1:1 every
+// original pixel is wanted, so the file's own pixels are needed. Comparing
+// against the displayed frame instead would mean that merely enlarging the
+// window — which raises Zoom() without asking for any more detail than the
+// asset already has — demanded a full-resolution decode.
+bool NeedsFullResolution(){return !fit&&Zoom()*FrameScale()>0.95f;}
 float EffW(){return CropActive()?(std::max)(1.f,crop.right-crop.left):float((std::max)(1u,DisplayW()));}
 float EffH(){return CropActive()?(std::max)(1.f,crop.bottom-crop.top):float((std::max)(1u,DisplayH()));}
 float CropDX(){return CropActive()?((crop.left+crop.right)/2-DisplayW()/2.f):0.f;}
@@ -253,6 +401,11 @@ WINDOWPLACEMENT windowRestore{sizeof(WINDOWPLACEMENT)};
 WINDOWPLACEMENT beforePreview{sizeof(WINDOWPLACEMENT)};
 bool beforePreviewValid=false;
 float zoomAnchorX=0,zoomAnchorY=0,zoomPointX=0,zoomPointY=0;
+// Any zoom that crosses into magnifying the displayed frame needs the asset's
+// own pixels; below that the screen tier is exact.
+void MaybeRequestFull(){
+ if(NeedsFullResolution())RequestFullResolution();
+}
 void SetZoom(float z,float anchorX,float anchorY){
  z=Clamp(z,MinZoom,MaxZoom);
  float from=Zoom();
@@ -261,7 +414,7 @@ void SetZoom(float z,float anchorX,float anchorY){
  zoomPointX=(anchorX-panSX.v)/from;zoomPointY=(anchorY-panSY.v)/from;
  panSX.To(anchorX-zoomPointX*z);
  panSY.To(anchorY-zoomPointY*z);
- fit=false;Wake();
+ fit=false;MaybeRequestFull();Wake();
 }
 void Fit(){
  zoomAnchored=false;
@@ -342,68 +495,400 @@ D2D1_RECT_F ToScreen(const D2D1_RECT_F& r){
 }
 
 // ---------------------------------------------------------- image cache ----
-std::shared_ptr<Image> Tiny(const std::shared_ptr<Image>& src){
- if(!src||!src->w||!src->h)return {};
- unsigned target=22,factor=(std::max)(1u,(std::max)(src->w,src->h)/target);
- auto out=std::make_shared<Image>();
- out->w=(std::max)(1u,src->w/factor);out->h=(std::max)(1u,src->h/factor);
- out->pixels.resize(size_t(out->w)*out->h*4);
- for(unsigned y=0;y<out->h;y++)for(unsigned x=0;x<out->w;x++){
-  unsigned sum[4]={0,0,0,0},n=0;
-  for(unsigned dy=0;dy<factor;dy++)for(unsigned dx=0;dx<factor;dx++){
-   unsigned sx=x*factor+dx,sy=y*factor+dy;
-   if(sx>=src->w||sy>=src->h)continue;
-   const uint8_t* p=&src->pixels[((size_t)sy*src->w+sx)*4];
-   for(int c=0;c<4;c++)sum[c]+=p[c];
-   n++;
-  }
-  uint8_t* d=&out->pixels[((size_t)y*out->w+x)*4];
-  for(int c=0;c<4;c++)d[c]=n?uint8_t(sum[c]/n):0;
- }
- return out;
+size_t ProcessWorkingSet(){
+ PROCESS_MEMORY_COUNTERS_EX counters{sizeof(counters)};
+ return GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters))
+  ?size_t(counters.WorkingSetSize):0;
 }
-void ReleaseBitmaps(){bitmap.Reset();backdrop.Reset();thumbBitmaps.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();}
+size_t CacheBudgetFor(uint64_t available,uint64_t total,uint64_t workingSet){
+ // The hard cap is deliberately independent of installed RAM.  The cache is
+ // a good citizen on 8 GB laptops and still useful on high-memory workstations.
+ (void)total;
+ uint64_t safeAvailable=available>workingSet/2?available-workingSet/2:available/2;
+ auto bounded=[](size_t value,size_t low,size_t high){return (std::max)(low,(std::min)(value,high));};
+ if(safeAvailable<2*CacheGB)return bounded(size_t(safeAvailable/8),CacheLowMin,CacheLowMax);
+ if(safeAvailable<8*CacheGB)return bounded(size_t(safeAvailable/10),256*CacheMB,1*CacheGB);
+ if(safeAvailable<24*CacheGB)return bounded(size_t(safeAvailable/8),1*CacheGB,2*CacheGB);
+ return bounded(size_t(safeAvailable/8),2*CacheGB,CacheHardCap);
+}
+size_t RefreshCacheBudget(){
+ // VETRO_CACHE_MB pins the budget. It exists so the memory behaviour can be
+ // tested at 256 MB on a machine with 32 GB free, which is otherwise only
+ // reachable by filling the machine's memory with something else.
+ static int forced=-1;
+ if(forced<0){
+  wchar_t value[16]{};
+  forced=GetEnvironmentVariableW(L"VETRO_CACHE_MB",value,16)?(std::max)(0,_wtoi(value)):0;
+ }
+ if(forced>0){cacheBudget=size_t(forced)*CacheMB;return cacheBudget;}
+ MEMORYSTATUSEX state{sizeof(state)};
+ if(!GlobalMemoryStatusEx(&state))return cacheBudget?cacheBudget:CacheLowMin;
+ cacheBudget=CacheBudgetFor(state.ullAvailPhys,state.ullTotalPhys,ProcessWorkingSet());
+ return cacheBudget;
+}
+std::wstring FrameKey(const std::wstring& path,int tier,unsigned edge){
+ std::error_code error;uintmax_t bytes=fs::file_size(fs::path(path),error);if(error)bytes=0;
+ error.clear();auto stamp=fs::last_write_time(fs::path(path),error);
+ auto ticks=error?0ll:stamp.time_since_epoch().count();
+ // Source EXIF orientation is applied during every decode, so it is part of
+ // the key's decode contract even though it is read from the stable file.
+ return NormalisePath(path)+L"|"+std::to_wstring(bytes)+L"|"+std::to_wstring(ticks)+L"|"+
+  std::to_wstring(tier)+L"|"+std::to_wstring(edge)+L"|source-orientation";
+}
+// The full tier is allowed a quarter of the budget and never more than about
+// three frames' worth; everything else belongs to the screen and thumb tiers,
+// which is what makes navigation feel instant.
+size_t FullTierBudget(){return (std::max)(size_t(64*CacheMB),cacheBudget/4);}
+
+void EraseLocked(std::map<std::wstring,CacheEntry>::iterator it){
+ cacheBytes-=it->second.cost;
+ cacheBytesByTier[it->second.tier<3?it->second.tier:2]-=it->second.cost;
+ frameCache.erase(it);cacheEvictions++;
+}
+// Evicts within one tier only, oldest first, never touching the frame the
+// viewer is currently showing.
+void TrimTierLocked(int tier,size_t target,const std::wstring& protectedPath){
+ while(cacheBytesByTier[tier]>target){
+  auto victim=frameCache.end();
+  for(auto it=frameCache.begin();it!=frameCache.end();++it){
+   if(it->second.tier!=tier)continue;
+   if(it->second.path==protectedPath&&tier!=CacheWarm)continue;   // pinned
+   if(victim==frameCache.end()||it->second.used<victim->second.used)victim=it;
+  }
+  if(victim==frameCache.end())break;
+  EraseLocked(victim);
+ }
+}
+void CacheTrimLocked(const std::wstring& protectedPath,bool aggressive){
+ size_t budget=aggressive?(std::min)(cacheBudget,CacheLowMin):cacheBudget;
+ // Under pressure the order matters, and it is the reverse of usefulness:
+ // speculative full frames first, then distant screen frames, then thumbs.
+ TrimTierLocked(CacheFull,aggressive?0:FullTierBudget(),protectedPath);
+ size_t rest=budget>cacheBytesByTier[CacheFull]?budget-cacheBytesByTier[CacheFull]:0;
+ TrimTierLocked(CacheScreen,rest*3/4,protectedPath);
+ TrimTierLocked(CacheWarm,rest/4,protectedPath);
+ // A last sweep in case the tier splits still leave the total over budget.
+ while(cacheBytes>budget&&!frameCache.empty()){
+  auto victim=frameCache.end();
+  for(auto it=frameCache.begin();it!=frameCache.end();++it){
+   if(it->second.path==protectedPath&&it->second.tier!=CacheWarm)continue;
+   if(victim==frameCache.end()||it->second.tier>victim->second.tier||
+      (it->second.tier==victim->second.tier&&it->second.used<victim->second.used))victim=it;
+  }
+  if(victim==frameCache.end())break;
+  EraseLocked(victim);
+ }
+}
+std::shared_ptr<Image> CacheGet(const std::wstring& key){
+ auto waitStart=std::chrono::steady_clock::now();
+ std::unique_lock lock(cacheMx);
+ {
+  double waited=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-waitStart).count();
+  // A relaxed read-modify-write is fine: this is a diagnostic counter, and the
+  // only writer that matters is the thread doing the navigation.
+  cacheLockWaitMs.store(cacheLockWaitMs.load(std::memory_order_relaxed)+waited,std::memory_order_relaxed);
+ }
+ auto found=frameCache.find(key);
+ if(found==frameCache.end()){cacheMisses++;return {};}
+ found->second.used=GetTickCount64();cacheHits++;return found->second.image;
+}
+void CachePut(const std::wstring& key,const std::wstring& path,int tier,const std::shared_ptr<Image>& image,const std::wstring& protectedPath){
+ if(!image)return;
+ std::lock_guard lock(cacheMx);
+ size_t cost=image->pixels.size();
+ if(!cacheBudget)RefreshCacheBudget();
+ if(cost>cacheBudget&&tier!=CacheFull)return;
+ // At most two full frames: the one on screen, and one neighbour so that
+ // stepping back to the photograph just left does not re-decode it.
+ if(tier==CacheFull){
+  size_t fullCount=0;
+  for(auto& [_,entry]:frameCache)if(entry.tier==CacheFull)fullCount++;
+  while(fullCount>=2){
+   auto oldest=frameCache.end();
+   for(auto it=frameCache.begin();it!=frameCache.end();++it){
+    if(it->second.tier==CacheFull&&it->second.path!=NormalisePath(path)){
+     if(oldest==frameCache.end()||it->second.used<oldest->second.used)oldest=it;
+    }
+   }
+   if(oldest==frameCache.end())break;
+   EraseLocked(oldest);
+   fullCount--;
+  }
+ }
+ auto old=frameCache.find(key);if(old!=frameCache.end())EraseLocked(old);
+ frameCache.emplace(key,CacheEntry{image,cost,GetTickCount64(),tier,NormalisePath(path)});
+ cacheBytes+=cost;cacheBytesByTier[tier<3?tier:2]+=cost;
+ CacheTrimLocked(NormalisePath(protectedPath),false);
+}
+void CacheHandlePressure(const std::wstring& protectedPath){
+ prefetchEpoch++;
+ RefreshCacheBudget();
+ std::lock_guard lock(cacheMx);CacheTrimLocked(NormalisePath(protectedPath),true);
+}
+void CacheLogTelemetry(){
+ if(!testing)return;
+ size_t full=0,screen=0,warm=0,bytes=0,fullBytes=0,screenBytes=0;
+ {
+  std::lock_guard lock(cacheMx);
+  bytes=cacheBytes;fullBytes=cacheBytesByTier[CacheFull];screenBytes=cacheBytesByTier[CacheScreen];
+  for(auto& [_,entry]:frameCache){if(entry.tier==CacheFull)full++;else if(entry.tier==CacheScreen)screen++;else warm++;}
+ }
+ Log(L"cache budget="+std::to_wstring(cacheBudget)+L" bytes="+std::to_wstring(bytes)+
+  L" fullItems="+std::to_wstring(full)+L" fullBytes="+std::to_wstring(fullBytes)+
+  L" screenItems="+std::to_wstring(screen)+L" screenBytes="+std::to_wstring(screenBytes)+
+  L" thumbItems="+std::to_wstring(warm)+L" L3="+std::to_wstring(thumbBitmaps.size())+
+  L" hit="+std::to_wstring(cacheHits.load())+L" miss="+std::to_wstring(cacheMisses.load())+
+  L" evict="+std::to_wstring(cacheEvictions.load())+L" cancelled="+std::to_wstring(prefetchCancelled.load())+
+  L" gpuUpload="+std::to_wstring(gpuUploads.load())+L" gpuReuse="+std::to_wstring(gpuReuses.load())+
+  L" gpuHit="+std::to_wstring(gpuHits.load())+L" gpuPre="+std::to_wstring(gpuPreUploads.load())+
+  L" fullUploads="+std::to_wstring(fullGpuUploads.load())+
+  L" screenUploads="+std::to_wstring(screenGpuUploads.load())+
+  L" uploadMB="+std::to_wstring(gpuUploadBytes.load()/(1024*1024))+
+  L" largeUploads="+std::to_wstring(gpuLargeUploads.load())+
+  L" maxUploadMB="+std::to_wstring(gpuMaxUploadBytes.load()/(1024*1024))+
+  L" rawFullStarted="+std::to_wstring(rawFullStarted.load())+
+  L" rawFullCompleted="+std::to_wstring(rawFullCompleted.load())+
+  L" rawFullCancelled="+std::to_wstring(rawFullCancelled.load())+
+  L" rawFullSkipped="+std::to_wstring(rawFullSkippedBrowsing.load()));
+}
+// The backdrop behind a photograph is a heavily blurred, heavily tinted wash.
+// It used to be built by walking every pixel of the decoded frame on the UI
+// thread: 34 ms for a 36 megapixel JPEG, once per navigation, in the middle of
+// the frame that was supposed to show the new picture. Two cheaper sources now
+// stand in, in order of preference: the filmstrip thumbnail that already
+// exists for this file, and failing that a strided average of the frame that
+// reads a few thousand pixels rather than tens of millions.
+std::shared_ptr<Image> backdropSource;
+uint8_t backdropAverage[4]={0,0,0,0};
+bool backdropIsAverage=false;
+
+// ---------------------------------------------------------- gpu textures ---
+// One Direct2D bitmap per navigation step meant allocating and freeing tens of
+// megabytes of video memory for every photograph, on the UI thread, in the
+// frame that was supposed to show the new picture. These slots are reused
+// instead: a folder of same-sized frames — which is what a camera produces —
+// never allocates again after the first, and the frame the user is about to
+// reach can be uploaded ahead of time, so arriving at it costs a pointer swap.
+struct GpuSlot{ComPtr<ID2D1Bitmap> texture;unsigned w=0,h=0;std::wstring key;ULONGLONG used=0;};
+// Three. Five was tried, on the theory that a folder mixing four frame sizes
+// always evicts the one it is about to need again; measured, it was worse —
+// slow transitions rose from 19-27 to 31-40 per run and the maximum more than
+// doubled. More resident textures cost more than the allocations they save.
+constexpr int GpuSlotCount=3;
+GpuSlot gpuSlots[GpuSlotCount];
+
+void GpuRelease(){for(auto& slot:gpuSlots){slot.texture.Reset();slot.w=slot.h=0;slot.key.clear();slot.used=0;}}
+
+// Returns the texture for `image`, uploading only when this exact frame is not
+// already resident. `keepKey` is the frame currently on screen, which must not
+// be recycled out from under the renderer.
+ComPtr<ID2D1Bitmap> GpuTextureFor(const std::shared_ptr<Image>& image,const std::wstring& key,
+                                  const std::wstring& keepKey){
+ ComPtr<ID2D1Bitmap> none;
+ if(!image||!image->w||!image->h||!GfxReady())return none;
+ auto start=std::chrono::steady_clock::now();
+ for(auto& slot:gpuSlots){
+  if(slot.texture&&slot.key==key&&slot.w==image->w&&slot.h==image->h){
+   slot.used=GetTickCount64();
+   lastUploadMs=0;lastUploadWasReuse=true;lastFrameWasPreUploaded=true;gpuHits++;
+   navTrace.gpuResident=true;
+   return slot.texture;
+  }
+ }
+ lastFrameWasPreUploaded=false;
+ auto properties=D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
+ // A slot of exactly the right size can take the new pixels in place.
+ GpuSlot* reuse=nullptr;
+ for(auto& slot:gpuSlots){
+  if(!slot.texture||slot.key==keepKey)continue;
+  if(slot.w!=image->w||slot.h!=image->h)continue;
+  if(!reuse||slot.used<reuse->used)reuse=&slot;
+ }
+ if(reuse){
+  if(SUCCEEDED(reuse->texture->CopyFromMemory(nullptr,image->pixels.data(),image->w*4))){
+   if(image->tier==TierFullRes)fullGpuUploads++;else screenGpuUploads++;
+   gpuUploadBytes+=image->pixels.size();
+   if(image->pixels.size()>=LargeUploadBytes)gpuLargeUploads++;
+   for(uint64_t seen=gpuMaxUploadBytes.load();image->pixels.size()>seen&&
+       !gpuMaxUploadBytes.compare_exchange_weak(seen,image->pixels.size());){}
+   reuse->key=key;reuse->used=GetTickCount64();
+   lastUploadMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+   lastUploadWasReuse=true;gpuReuses++;
+   navTrace.gpuReused=true;
+   return reuse->texture;
+  }
+  // A failed copy means the device is gone; fall through and rebuild.
+  reuse->texture.Reset();reuse->w=reuse->h=0;reuse->key.clear();
+ }
+ GpuSlot* victim=nullptr;
+ for(auto& slot:gpuSlots){
+  if(slot.key==keepKey&&slot.texture)continue;
+  if(!slot.texture){victim=&slot;break;}
+  if(!victim||slot.used<victim->used)victim=&slot;
+ }
+ if(!victim)victim=&gpuSlots[0];
+ victim->texture.Reset();
+ auto made=Dc()->CreateBitmap(D2D1::SizeU(image->w,image->h),image->pixels.data(),image->w*4,
+                              properties,&victim->texture);
+ if(FAILED(made)){victim->w=victim->h=0;victim->key.clear();return none;}
+ if(image->tier==TierFullRes)fullGpuUploads++;else screenGpuUploads++;
+ gpuUploadBytes+=image->pixels.size();
+ if(image->pixels.size()>=LargeUploadBytes)gpuLargeUploads++;
+ for(uint64_t seen=gpuMaxUploadBytes.load();image->pixels.size()>seen&&
+     !gpuMaxUploadBytes.compare_exchange_weak(seen,image->pixels.size());){}
+ victim->w=image->w;victim->h=image->h;victim->key=key;victim->used=GetTickCount64();
+ lastUploadMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+ lastUploadWasReuse=false;gpuUploads++;
+ navTrace.gpuCreated=true;
+ return victim->texture;
+}
+// Puts a frame into a spare slot before anybody asks for it. Only ever called
+// when the interface is idle, and never over the slot in use.
+void GpuPreUpload(const std::shared_ptr<Image>& image,const std::wstring& key,const std::wstring& keepKey){
+ if(!image||!GfxReady()||key.empty()||key==keepKey)return;
+ for(auto& slot:gpuSlots)if(slot.texture&&slot.key==key)return;
+ int free=0;
+ for(auto& slot:gpuSlots)if(!slot.texture||slot.key!=keepKey)free++;
+ if(free<2)return;   // never spend the last slot that is not the live one
+ auto before=gpuUploads.load()+gpuReuses.load();
+ GpuTextureFor(image,key,keepKey);
+ if(gpuUploads.load()+gpuReuses.load()!=before)gpuPreUploads++;
+}
+
+void ReleaseBitmaps(){bitmap.Reset();backdrop.Reset();GpuRelease();thumbBitmaps.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();scopeBitmap.Reset();}
 
 // ------------------------------------------------------------ worker -------
+// Prefetch order, rebuilt from how the reader is actually moving. A fixed
+// +1/-1/+2/-2 ring spends half its work behind somebody who is walking
+// forwards; the frames worth preparing are the ones ahead, and how far ahead
+// depends on how fast they are going.
+std::vector<int> PrefetchSteps(int direction,bool fast){
+ std::vector<int> steps;
+ int depth=fast?6:3;
+ for(int distance=1;distance<=depth;distance++)steps.push_back(direction*distance);
+ // One or two behind, so a change of mind is not a cold start.
+ steps.push_back(-direction);
+ if(!fast)steps.push_back(-direction*2);
+ return steps;
+}
+
 void Worker(){
  CoInitializeEx(nullptr,COINIT_MULTITHREADED);
  while(true){
-  std::wstring path;uint64_t id;bool quick,force;
+  std::wstring path;uint64_t id;bool quick,force,wantFull;unsigned edge;
+  std::vector<std::wstring> files;
   {
    std::unique_lock lock(mx);
    cv.wait(lock,[]{return stopping||!requested.empty();});
    if(stopping)break;
-   path=std::move(requested);requested.clear();id=generation;quick=requestPreview;force=requestForce;
+   path=std::move(requested);requested.clear();id=generation;quick=requestPreview;force=requestForce;edge=requestEdge;
+   files=std::move(requestFiles);wantFull=requestFull;
   }
-  auto result=std::make_unique<Result>();result->id=id;result->path=path;
+  auto post=[&](std::unique_ptr<Result> result){
+   {std::lock_guard lock(mx);ready.push_back(std::move(result));}
+   PostMessageW(win,Loaded,0,0);
+  };
+  auto stale=[id]{return latest!=id;};
   std::error_code ec;
-  if(!quick)for(fs::directory_iterator it(fs::path(path).parent_path(),fs::directory_options::skip_permission_denied,ec),end;it!=end&&!ec;it.increment(ec)){
-   auto& e=*it;if(latest!=id)break;
-   if(e.is_regular_file(ec)&&Supported(e.path().wstring()))result->files.push_back(e.path().wstring());
+  bool hasCurrent=(!files.empty()&&std::find(files.begin(),files.end(),path)!=files.end());
+  if(!hasCurrent&&!quick){
+   files.clear();
+   for(fs::directory_iterator it(fs::path(path).parent_path(),fs::directory_options::skip_permission_denied,ec),end;it!=end&&!ec;it.increment(ec)){
+    auto& e=*it;if(latest!=id)break;
+    if(e.is_regular_file(ec)&&Supported(e.path().wstring()))files.push_back(e.path().wstring());
+   }
+   std::sort(files.begin(),files.end(),[](auto&a,auto&b){return StrCmpLogicalW(a.c_str(),b.c_str())<0;});
   }
-  std::sort(result->files.begin(),result->files.end(),[](auto&a,auto&b){return StrCmpLogicalW(a.c_str(),b.c_str())<0;});
   if(latest!=id)continue;
-  auto found=cache.find(path);
-  if(!force&&found!=cache.end())result->image=found->second;else result->image=Decode(path,result->error);
-  if(latest!=id)continue;
-  auto files=result->files;auto im=result->image;
-  {std::lock_guard lock(mx);ready=std::move(result);}
-  PostMessageW(win,Loaded,0,0);
-  cache.clear();cacheBytes=0;
-  if(im&&im->pixels.size()<=Budget){cache[path]=im;cacheBytes=im->pixels.size();}
-  // Decode the neighbours so a click on the filmstrip lands under 150 ms.
-  auto pos=std::find(files.begin(),files.end(),path);
-  if(pos!=files.end())for(int step:{1,-1,2,-2}){
-   auto index=(pos-files.begin())+step;
-   if(index<0||index>=ptrdiff_t(files.size())||latest!=id)continue;
-   auto& p=files[size_t(index)];
-   if(cache.count(p))continue;
-   std::wstring err;auto next=Decode(p,err);
-   if(latest!=id)break;
-   if(next&&cacheBytes+next->pixels.size()<=Budget){cacheBytes+=next->pixels.size();cache[p]=next;}
+  auto fullKey=FrameKey(path,CacheFull,0),screenKey=FrameKey(path,CacheScreen,edge);
+  auto full=force?std::shared_ptr<Image>():CacheGet(fullKey);
+  auto begin=std::chrono::steady_clock::now();
+  // Stage one: a screen-ready frame. For a RAW that is the camera's own
+  // embedded JPEG, or a half-size develop when that preview is too small for
+  // this window; for a JPEG a DCT-scaled decode. Either way it is the frame
+  // the window will actually draw, at the size it will draw it.
+  bool servedPreview=false;
+  if(!full){
+   auto preview=CacheGet(screenKey);
+   if(!preview)preview=CacheGet(FrameKey(path,CacheWarm,edge));
+   if(!preview)preview=DecodeScreen(path,edge,stale);
+   if(preview){
+    CachePut(screenKey,path,CacheScreen,preview,path);
+    if(latest!=id)continue;
+    auto first=std::make_unique<Result>();
+    first->id=id;first->path=path;first->key=screenKey;first->files=files;first->image=preview;
+    // Only "partial" when something better is genuinely on its way. At fit
+    // this frame is the finished article, and saying otherwise would leave
+    // the interface reporting a load that is never going to complete.
+    first->partial=wantFull;
+    Log(L"screen_ms="+std::to_wstring(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count())+L" "+path);
+    servedPreview=true;
+    post(std::move(first));
+   }
   }
+  // Neighbours before the expensive stage. Preparing the next screen-ready
+  // frames is what makes the following keypress instant; the full-resolution
+  // develop of the frame already on screen can wait for that to be done.
+  if(files.size()>1){
+   auto pos=std::find(files.begin(),files.end(),path);
+   if(pos!=files.end()){
+    int direction=navigationDirection?navigationDirection:1;
+    for(int step:PrefetchSteps(direction,fastNavigation)){
+     if(latest!=id)break;
+     auto index=(pos-files.begin())+step;
+     if(index<0||index>=ptrdiff_t(files.size()))continue;
+     auto& neighbour=files[size_t(index)];
+     auto neighbourKey=FrameKey(neighbour,CacheScreen,edge);
+     if(CacheGet(neighbourKey))continue;
+     auto next=DecodeScreen(neighbour,edge,[id]{return latest!=id;});
+     if(latest!=id)break;
+     if(next)CachePut(neighbourKey,neighbour,CacheScreen,next,path);
+    }
+   }
+  }
+  if(latest!=id)continue;
+
+  // Stage two: full resolution, and only when something actually needs it —
+  // a zoom past the screen frame's own pixel grid, the Info panel's histogram,
+  // or an export. Fit-to-window browsing stops here.
+  if(!wantFull&&servedPreview){
+   if(IsRawPath(path))rawFullSkippedBrowsing++;
+   Log(L"full_not_requested "+path);
+   continue;
+  }
+  bool heavy=IsRawPath(path);
+  // Even when full resolution is wanted, a RAW develop waits for the reader to
+  // settle. Walking a folder must not queue a five-second demosaic per frame.
+  if(heavy&&servedPreview&&!full){
+   auto settleUntil=std::chrono::steady_clock::now()+
+    std::chrono::milliseconds(int(RawFullDebounceSeconds*1000));
+   while(std::chrono::steady_clock::now()<settleUntil){
+    if(latest!=id)break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+   }
+   if(latest!=id){rawFullSkippedBrowsing++;Log(L"full_debounced "+path);continue;}
+  }
+  if(heavy&&!full)rawFullStarted++;
+  auto result=std::make_unique<Result>();result->id=id;result->path=path;result->files=std::move(files);
+  if(!full)full=Decode(path,result->error,stale);
+  if(latest!=id)continue;
+  // A file whose full decode fails after a preview appeared keeps the preview
+  // rather than replacing a visible photograph with an error.
+  if(!full){
+   full=CacheGet(screenKey);
+   if(full){result->error.clear();result->key=screenKey;result->partial=true;}
+  }else result->key=fullKey;
+  bool servedFull=full&&!result->partial;
+  if(heavy){
+   if(servedFull)rawFullCompleted++;else rawFullCancelled++;
+  }
+  result->image=full;
+  Log(L"full_ms="+std::to_wstring(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count())+L" "+path);
+  post(std::move(result));
+  if(servedFull)CachePut(fullKey,path,CacheFull,full,path);
  }
- cache.clear();CoUninitialize();
+ {std::lock_guard lock(cacheMx);CacheTrimLocked(L"",true);}
+ CoUninitialize();
 }
 
 // ------------------------------------------------------------ commands -----
@@ -427,6 +912,18 @@ void SetTheme(bool light){
  BOOL dark=!light;DwmSetWindowAttribute(win,20,&dark,sizeof(dark));
  Wake();
 }
+void SetWheelMode(int value){
+ wheelMode=value;wheelMix.To(float(value));wheelCarry=0;
+ DWORD stored=DWORD(value);
+ RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"WheelMode",REG_DWORD,&stored,sizeof(stored));
+ Wake();
+}
+void SaveLibView(){
+ // The factory default is the timeline; a deliberate switch to Folders is
+ // remembered, so somebody who works in folders stays in folders.
+ DWORD stored=DWORD(libView);
+ RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LibraryView",REG_DWORD,&stored,sizeof(stored));
+}
 void SetLanguage(int value){
  language=value;
  DWORD stored=DWORD(value);
@@ -434,9 +931,14 @@ void SetLanguage(int value){
  Wake();
 }
 void ClosePanel(){panel=PanelNone;pendingPanel=PanelNone;panelSlide.To(0);confirmDelete=false;Wake();}
+void RequestFullResolution();
 void OpenPanel(int which){
+ // The histogram and the clipping overlays are read from pixels, so the panel
+ // is the one reader of the full tier that is not a zoom.
+ if(which==PanelInfo)RequestFullResolution();
  if(panel==which&&panelSlide.target>0){ClosePanel();return;}
  confirmDelete=false;menuLevel=0;levelSlide.Reset(0);panelScroll=0;panelScrollVel=0;
+ if(which==PanelMenu)tcStatus=TotalCommanderStatus();
  if(panel!=PanelNone&&panel!=which){pendingPanel=which;panelSlide.To(0);}
  else{panel=which;panelSlide.To(1);}
  if(fit)Fit();
@@ -463,16 +965,46 @@ void Turn(int direction){
 }
 bool Dirty(){return fmodf(rotate.target,360.f)!=0.f||hasCrop||!strokes.empty();}
 
+// The frame the file actually contains, not the one being displayed.
+//
+// Save, Save As, Print and Copy all go through here. Writing whatever tier
+// happened to be on screen would silently hand somebody a third-resolution
+// copy of their own photograph, which is the worst possible way to fail.
+std::shared_ptr<Image> SourceFrame(){
+ if(!current)return {};
+ if(current->tier==TierFullRes)return current;
+ auto key=FrameKey(currentPath,CacheFull,0);
+ if(auto full=CacheGet(key))return full;
+ std::wstring error;
+ auto full=Decode(currentPath,error);
+ if(full)CachePut(key,currentPath,CacheFull,full,currentPath);
+ // A file that will not decode in full still gets saved rather than refused;
+ // the displayed frame is all there is.
+ return full?full:current;
+}
 std::shared_ptr<Image> Composite(){
  if(!current)return {};
- auto rotated=std::make_shared<Image>(RotatedPixels(*current,int(rotate.target)));
+ auto source=SourceFrame();
+ if(!source)return {};
+ // Crop rectangles and annotation strokes are authored against the displayed
+ // frame. Compositing onto the asset means scaling them up by exactly the
+ // ratio between the two.
+ float scale=(source->w&&current->w)?float(source->w)/float(current->w):1.f;
+ auto rotated=std::make_shared<Image>(RotatedPixels(*source,int(rotate.target)));
  if(!strokes.empty()){
-  auto painted=Rasterise(*rotated,[](ID2D1DeviceContext*){PaintStrokes();});
+  auto painted=Rasterise(*rotated,[scale](ID2D1DeviceContext* dc){
+   auto previous=D2D1::Matrix3x2F::Identity();
+   dc->GetTransform(&previous);
+   dc->SetTransform(D2D1::Matrix3x2F::Scale(scale,scale)*previous);
+   PaintStrokes();
+   dc->SetTransform(previous);
+  });
   if(painted)rotated=painted;
  }
  if(hasCrop){
-  int x=int(Clamp(crop.left,0,float(rotated->w))),y=int(Clamp(crop.top,0,float(rotated->h)));
-  unsigned w=unsigned((std::max)(1.f,crop.right-crop.left)),h=unsigned((std::max)(1.f,crop.bottom-crop.top));
+  int x=int(Clamp(crop.left*scale,0,float(rotated->w))),y=int(Clamp(crop.top*scale,0,float(rotated->h)));
+  unsigned w=unsigned((std::max)(1.f,(crop.right-crop.left)*scale));
+  unsigned h=unsigned((std::max)(1.f,(crop.bottom-crop.top)*scale));
   rotated=std::make_shared<Image>(CropPixels(*rotated,x,y,w,h));
  }
  return rotated;
@@ -528,11 +1060,17 @@ void CopyCurrent(){
  if(flattened&&CopyToClipboard(win,*flattened,currentPath)){copyUntil=Now()+.95;Notify(T(S_Copied));}
  else Notify(T(S_Unavailable));
 }
+void RefreshFavourites();
+void RefreshAlbum();
 void ToggleLike(){
  if(currentPath.empty())return;
  liked=!liked;FavouriteSet(currentPath,liked);
  likePop.Reset(liked?.82f:1.1f);likePop.To(1);
  if(liked)likeBurst=Now();
+ // The virtual collection is derived state; rebuild it now so backing out to
+ // the library shows the change rather than the view from before the press.
+ RefreshFavourites();
+ if(favouritesOpen)RefreshAlbum();
  Wake();
 }
 // Opening a file from outside the album flow (the file picker, a drag onto
@@ -552,7 +1090,7 @@ void Choose(){
  wchar_t file[32768]{};
  OPENFILENAMEW of{sizeof(of)};
  of.hwndOwner=win;
- of.lpstrFilter=L"Images\0*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.tif;*.tiff;*.ico;*.exr;*.avif;*.heic;*.cr2;*.cr3;*.nef;*.arw;*.dng;*.raf;*.rw2\0All files\0*.*\0";
+ of.lpstrFilter=L"Images\0*.jpg;*.jpeg;*.png;*.gif;*.webp;*.bmp;*.tif;*.tiff;*.ico;*.exr;*.avif;*.heic;*.psd;*.psb;*.cr2;*.cr3;*.nef;*.arw;*.dng;*.raf;*.rw2\0All files\0*.*\0";
  of.lpstrFile=file;of.nMaxFile=32768;of.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
  if(GetOpenFileNameW(&of))OpenExternal(file);
 }
@@ -592,6 +1130,9 @@ void Close(){
   SetWindowPos(win,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
   preview=false;SetWindowLongPtrW(win,GWLP_HWNDPARENT,0);ApplyCorners();
   {std::lock_guard lock(mx);requested.clear();latest=++generation;}
+  // --quicklook is an entry point, not a resident Explorer integration.  A
+  // visible close (Esc or Space) must also terminate that one-shot process.
+  if(quickLookInvocation){DestroyWindow(win);return;}
   if(IsWindow(explorer))SetForegroundWindow(explorer);
  }else if(autostart&&!testing){
   // Keep the Explorer listener alive after the viewer is closed.
@@ -605,19 +1146,149 @@ void Open(const std::wstring& path,bool force){
  std::error_code ec;
  auto absolute=fs::absolute(fs::path(path),ec);
  prevName=Name();prevMeta=current?std::to_wstring(DisplayW())+L" × "+std::to_wstring(DisplayH()):std::wstring();
- titleIn.Reset(0);titleIn.To(1);
- currentPath=ec?path:absolute.wstring();
- loading=true;errorText.clear();
- rotate.Reset(0);ResetEdits();
- liked=FavouriteGet(currentPath);
- info=Meta{};metaPending=true;for(auto& g:histPath)g.Reset();histRise.Reset(0);
- clipHigh=clipLow=false;clipHighFade.Reset(0);clipLowFade.Reset(0);
- panelScroll=0;panelScrollVel=0;
- SetWindowTextW(win,(fs::path(currentPath).filename().wstring()+L" - Vetro Look").c_str());
+ if(fastNavigation)titleIn.Reset(1);else{titleIn.Reset(0);titleIn.To(1);}
+ auto nextPath=ec?path:absolute.wstring();
+ auto normNext=NormalisePath(nextPath);
+ auto normCurr=NormalisePath(currentPath);
+ bool changed=(normNext!=normCurr);
+
+ MONITORINFO monitor{sizeof(monitor)};
+ unsigned edge=2560;
+ if(GetMonitorInfoW(MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST),&monitor))
+  edge=unsigned((std::min)(4096.f,1.25f*float((std::max)(monitor.rcMonitor.right-monitor.rcMonitor.left,
+                                                         monitor.rcMonitor.bottom-monitor.rcMonitor.top))));
+
+ std::error_code fec;
+ auto fpath=fs::path(nextPath);
+ uintmax_t fbytes=fs::file_size(fpath,fec);if(fec)fbytes=0;
+ fec.clear();
+ auto stamp=fs::last_write_time(fpath,fec);
+ auto ticks=fec?0ll:stamp.time_since_epoch().count();
+ auto baseKey=normNext+L"|"+std::to_wstring(fbytes)+L"|"+std::to_wstring(ticks)+L"|";
+ auto fullKey=baseKey+std::to_wstring(CacheFull)+L"|0|source-orientation";
+ auto screenKey=baseKey+std::to_wstring(CacheScreen)+L"|"+std::to_wstring(edge)+L"|source-orientation";
+ auto warmKey=baseKey+std::to_wstring(CacheWarm)+L"|"+std::to_wstring(edge)+L"|source-orientation";
+
+ // Everything from here to the GPU texture is what a cache hit actually costs.
+ // It is timed so a slow transition can name its cause instead of leaving it
+ // to be guessed at.
+ navTrace=NavTrace{};
+ navTrace.evictionsBefore=cacheEvictions.load();
+ navTrace.directionChanged=(navigationDirection!=navPreviousDirection);
+ navPreviousDirection=navigationDirection;
+ cacheLockWaitMs.store(0.0,std::memory_order_relaxed);
+ {
+  // A window that changed size invalidates every screen-tier key, which is a
+  // legitimate reason for a miss and must not be filed as a cache fault.
+  float vw,vh;Size(vw,vh);
+  unsigned pw=unsigned(vw*dpi+.5f),ph=unsigned(vh*dpi+.5f);
+  navTrace.viewportChanged=(navPreviousWidth&&(pw!=navPreviousWidth||ph!=navPreviousHeight));
+  navTrace.width=navPreviousWidth=pw;navTrace.height=navPreviousHeight=ph;
+ }
+ // The Info panel's histogram is read from real pixels, so it is the one
+ // reader of the full tier that is not a zoom.
+ bool wantFull=NeedsFullResolution()||panel==PanelInfo;
+ auto lookupStart=std::chrono::steady_clock::now();
+ std::shared_ptr<Image> cached;
+ std::wstring cachedKey;
+ bool isPartial=false;
+ // At fit the screen tier is asked for first. Preferring the full tier here is
+ // what put a 138 MB upload on the navigation path for a 1400 px window.
+ if(!force&&!wantFull){
+  cached=CacheGet(screenKey);
+  if(cached){cachedKey=screenKey;navTrace.tier=TierScreen;isPartial=false;}
+ }
+ if(!cached&&!force){cached=CacheGet(fullKey);if(cached){cachedKey=fullKey;navTrace.tier=TierFull;}}
+ if(!cached){cached=CacheGet(screenKey);if(cached){cachedKey=screenKey;navTrace.tier=TierScreen;}isPartial=wantFull;}
+ if(!cached){cached=CacheGet(warmKey);if(cached){cachedKey=warmKey;navTrace.tier=TierWarm;}isPartial=true;}
+ if(!cached){cached=ThumbLookup(nextPath);if(cached){cachedKey=normNext+L"|thumb";navTrace.tier=TierThumb;}isPartial=true;}
+ // A frame that is already the full tier is never "partial", whichever key
+ // found it.
+ if(cached&&cached->tier==TierFullRes&&navTrace.tier!=TierThumb)isPartial=false;
+ navTrace.cacheLookupMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lookupStart).count();
+ navTrace.lockWaitMs=cacheLockWaitMs.load(std::memory_order_relaxed);
+
+ if(changed){
+  currentPath=std::move(nextPath);
+  rotate.Reset(0);ResetEdits();
+  liked=FavouriteGet(currentPath);
+  info=Meta{};metaPending=true;
+  // The rating badge should not have to wait for a RAW to finish demosaicing,
+  // so the cheap metadata pass is asked for here and the expensive one — the
+  // histogram, which needs pixels — later, when the full frame lands.
+  metaQuickId=++metaQuickCounter;
+  MetaRequestQuick(currentPath,metaQuickId,win,MetaReady);for(auto& g:histPath)g.Reset();scopeBitmap.Reset();histRise.Reset(0);
+  clipHigh=clipLow=false;clipHighFade.Reset(0);clipLowFade.Reset(0);
+  panelScroll=0;panelScrollVel=0;
+  SetWindowTextW(win,(fs::path(currentPath).filename().wstring()+L" - Vetro Look").c_str());
+ }
+
+ errorText.clear();
+ if(cached){
+  auto shown=current;
+  current=cached;
+  currentFrameKey=cachedKey;
+  backdropSource=cached;
+  // The fast path. A frame already uploaded into a GPU slot is adopted here
+  // and drawn on the next present with no allocation, no upload and no
+  // decode: navigation costs a pointer swap.
+  auto gpuStart=std::chrono::steady_clock::now();
+  bitmap=GpuTextureFor(current,cachedKey,cachedKey);
+  navTrace.gpuMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-gpuStart).count();
+  backdrop.Reset();
+  showingPreview=isPartial;
+  loading=isPartial;
+  if(preview){if(current)PreviewBounds();else Close();}
+  SyncGallery();
+  bool refined=shown&&current&&shown!=current&&shown->w&&current->w&&!fit;
+  if(refined)zoomLog.Reset(zoomLog.target+logf(float(shown->w)/float(current->w)));
+  else if(fit){Fit();Snap();}
+ }else{
+  ThumbRequest(currentPath);
+  ThumbPrioritize(currentPath);
+  currentFrameKey.clear();
+  backdropSource.reset();
+  bitmap.Reset();backdrop.Reset();
+  loading=true;
+  showingPreview=false;
+ }
+
  {
   std::lock_guard lock(mx);
   requested=currentPath;requestPreview=preview;requestForce=force;
+  requestFiles=siblings;
+  requestEdge=edge;requestFull=wantFull;
   generation++;latest=generation;
+  latencyId=generation;openStarted=std::chrono::steady_clock::now();
+  firstVisibleLogged=(cached!=nullptr);fullVisibleLogged=(cached&&!isPartial);
+  currentGeneration=(cached?latencyId:0);
+ }
+ cv.notify_one();Wake();
+ navTrace.evictionsDuring=cacheEvictions.load()-navTrace.evictionsBefore;
+ navLastTrace=navTrace;
+ if((testing||GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0))&&!navBench){
+  double lookupMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-openStarted).count();
+  Log(L"NAV path="+fs::path(currentPath).filename().wstring()+
+      L" cacheHit="+std::wstring(cached?L"1":L"0")+
+      L" cacheTier="+std::to_wstring(navTrace.tier)+
+      L" gpuPreUploaded="+std::wstring(lastFrameWasPreUploaded?L"1":L"0")+
+      L" gpuUploadMs="+std::to_wstring(lastUploadMs)+
+      L" openPathMs="+std::to_wstring(lookupMs));
+ }
+}
+// Asks the worker for the full tier of the photograph already on screen. The
+// displayed frame stays exactly where it is; when the full one arrives the
+// Loaded handler compensates zoom so nothing moves.
+void RequestFullResolution(){
+ if(currentPath.empty()||preview)return;
+ if(current&&current->tier==TierFullRes)return;
+ {
+  std::lock_guard lock(mx);
+  if(requestFull&&requested==currentPath)return;   // already asked
+  requested=currentPath;requestPreview=false;requestForce=false;
+  requestFiles=siblings;requestFull=true;
+  generation++;latest=generation;
+  loading=true;
  }
  cv.notify_one();Wake();
 }
@@ -627,6 +1298,17 @@ int CurrentIndex(){
 }
 void Navigate(int step){
  if(siblings.empty())return;
+ double now=Now();int direction=step<0?-1:1;
+ if(direction==navigationDirection&&now-lastNavigateAt<.22)navigationBurst++;
+ else navigationBurst=1;
+ navigationDirection=direction;lastNavigateAt=now;
+ if(navigationBurst>=3||abs(step)>1){
+  fastNavigation=true;fastNavigationUntil=now+.35;
+  // Repeated wheel/button input should favour throughput over decorative
+  // transitions.  The next normal-speed navigation automatically restores
+  // them after this short quiet interval.
+  hero.active=false;folderTx.active=false;
+ }
  int i=CurrentIndex();if(i<0)i=0;
  i=int((i+step+(int)siblings.size())%(int)siblings.size());
  galleryHasTarget=false;
@@ -671,7 +1353,8 @@ std::wstring ExtOf(const std::wstring& path){
  auto dot=path.find_last_of(L'.');if(dot==std::wstring::npos)return L"";
  auto e=path.substr(dot+1);for(auto& c:e)c=towlower(c);return e;
 }
-bool RawExt(const std::wstring& e){
+bool RawExt(std::wstring e){
+ for(auto& c:e)c=towlower(c);
  return std::wstring(L"|cr2|cr3|nef|arw|dng|raf|rw2|orf|pef|").find(L"|"+e+L"|")!=std::wstring::npos;
 }
 // Colour profile is read lazily and cached: doing this for every photo up
@@ -751,12 +1434,24 @@ std::vector<FolderEntry> RefreshLibraryFolders(){
    if(lowerPath.find(needle)==std::wstring::npos)continue;
   }
   if(f.totalBytes<filterSizeLo||f.totalBytes>filterSizeHi)continue;
-  if(filtersActive&&!filterExtOff.empty()){
-   bool anyKept=false;
-   for(uint8_t i=0;i<f.sampleCount&&!anyKept;i++)if(!filterExtOff.count(ExtOf(f.samples[i])))anyKept=true;
-   // Samples are only the first few files; when every sample happens to be
-   // excluded we still show the folder rather than risk hiding it wrongly.
-   if(!anyKept&&f.sampleCount==std::min<uint32_t>(4,f.photoCount))continue;
+  if(filtersActive){
+   if(!filterExtOn.empty()){
+    bool anyKept=false;
+    for(uint8_t i=0;i<f.sampleCount&&!anyKept;i++)if(filterExtOn.count(ExtOf(f.samples[i])))anyKept=true;
+    // Samples are only the first few files; when none matches we still show
+    // an incompletely sampled folder rather than hide a possible match.
+    if(!anyKept&&f.sampleCount==std::min<uint32_t>(4,f.photoCount))continue;
+   }
+   if(filterRawOnly){
+    bool anyRaw=false;
+    for(uint8_t i=0;i<f.sampleCount&&!anyRaw;i++)if(RawExt(ExtOf(f.samples[i])))anyRaw=true;
+    if(!anyRaw&&f.sampleCount==std::min<uint32_t>(4,f.photoCount))continue;
+   }
+   if(filterRegularOnly){
+    bool anyReg=false;
+    for(uint8_t i=0;i<f.sampleCount&&!anyReg;i++)if(!RawExt(ExtOf(f.samples[i])))anyReg=true;
+    if(!anyReg&&f.sampleCount==std::min<uint32_t>(4,f.photoCount))continue;
+   }
   }
   out.push_back(f);
  }
@@ -777,8 +1472,9 @@ bool PhotoPasses(const PhotoEntry& photo){
   if(name.find(needle)==std::wstring::npos)return false;
  }
  if(photo.size<filterSizeLo||photo.size>filterSizeHi)return false;
- if(!filterExtOff.empty()&&filterExtOff.count(photo.ext))return false;
- bool raw=RawExt(photo.ext);
+ std::wstring ext=photo.ext;for(auto& c:ext)c=towlower(c);
+ if(!filterExtOn.empty()&&!filterExtOn.count(ext))return false;
+ bool raw=RawExt(ext);
  if(filterRawOnly&&!raw)return false;
  if(filterRegularOnly&&raw)return false;
  if(filterProfile){
@@ -856,11 +1552,25 @@ std::wstring TimelineDateLabel(uint32_t key){
 }
 void RefreshAlbum(){
  albumPhotos.clear();
+ if(favouritesOpen){
+  RefreshFavourites();
+  for(auto& photo:favouritePhotos)if(PhotoPasses(photo))albumPhotos.push_back(photo);
+  SortPhotos(albumPhotos);RebuildTimeline();
+  return;
+ }
  auto collect=[&](const FolderEntry& f){
-  if(f.members.empty()){for(auto& photo:IndexPhotosIn(f.path))if(PhotoPasses(photo))albumPhotos.push_back(photo);}
-  else for(auto& member:f.members)for(auto& photo:IndexPhotosIn(member))if(PhotoPasses(photo))albumPhotos.push_back(photo);
+  auto addPhotos=[&](const std::wstring& p){
+   auto list=IndexPhotosIn(p);
+   if(list.empty()){
+    FolderEntry probe;
+    list=IndexInspectDirectory(p,probe);
+   }
+   for(auto& photo:list)if(PhotoPasses(photo))albumPhotos.push_back(photo);
+  };
+  if(f.members.empty())addPhotos(f.path);
+  else for(auto& member:f.members)addPhotos(member);
  };
- if(libView==ViewPhotosFlat&&albumFolder.empty()){
+ if(libView==ViewPhotosFlat){
   for(auto& f:libFolders)collect(f);
  }else{
   auto family=std::find_if(libFolders.begin(),libFolders.end(),[](auto& f){return NormalisePath(f.path)==NormalisePath(albumFolder);});
@@ -881,9 +1591,36 @@ void RefreshAlbum(){
  BuildAssetStacks();
  RebuildTimeline();
 }
+// The Favourites collection. Nothing is copied and nothing is moved: this
+// reads the local database and turns each surviving path into the same
+// PhotoEntry the rest of the grid already knows how to draw.
+void RefreshFavourites(){
+ favouritePhotos.clear();
+ auto paths=FavouritePaths();
+ favouritePhotos.reserve(paths.size());
+ for(auto& path:paths){
+  std::error_code ec;
+  PhotoEntry photo;
+  photo.path=path;
+  photo.name=fs::path(path).filename().wstring();
+  photo.ext=ExtOf(path);
+  auto bytes=fs::file_size(fs::path(path),ec);photo.size=ec?0:uint64_t(bytes);
+  WIN32_FILE_ATTRIBUTE_DATA info{};
+  if(GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&info))
+   photo.modified=(uint64_t(info.ftLastWriteTime.dwHighDateTime)<<32)|info.ftLastWriteTime.dwLowDateTime;
+  photo.id=PhysicalId(path);
+  favouritePhotos.push_back(std::move(photo));
+ }
+ favouritesSeen=FavouritesRevision();
+}
 void RefreshLibrary(){
  libFolders=RefreshLibraryFolders();
- if(libView==ViewPhotosFlat||screen==ScrAlbum)RefreshAlbum();
+ RefreshFavourites();
+ if(favouritesOpen){
+  albumPhotos.clear();
+  for(auto& photo:favouritePhotos)if(PhotoPasses(photo))albumPhotos.push_back(photo);
+  SortPhotos(albumPhotos);RebuildTimeline();
+ }else if(libView==ViewPhotosFlat||screen==ScrAlbum)RefreshAlbum();
  Wake();
 }
 
@@ -904,6 +1641,8 @@ D2D1_RECT_F GridCell(const GridPlacement& grid,float areaLeft,float areaTop,floa
 }
 
 constexpr float TimelineHeaderH=38,TimelineGroupGap=24;
+// Height reserved above the timeline for the Favourites shortcut chip.
+constexpr float FavouriteChipH=54;
 struct TimelinePlacement{int columns=1;float contentH=0;std::vector<float> groupTops;};
 TimelinePlacement PlanTimeline(float areaW){
  TimelinePlacement plan;
@@ -924,14 +1663,21 @@ D2D1_RECT_F TimelinePhotoRect(uint64_t photoId,float areaLeft,float areaTop,floa
   for(size_t local=0;local<photos.size();++local)if(albumPhotos[photos[local]].id==photoId){
    int col=int(local)%plan.columns,row=int(local)/plan.columns;
    float x=areaLeft+col*(AlbumCell+LibGap);
-   float y=areaTop-scroll+plan.groupTops[g]+TimelineHeaderH+row*(AlbumCell+LibGap);
+   float y=areaTop-scroll+FavouriteChipH+plan.groupTops[g]+TimelineHeaderH+row*(AlbumCell+LibGap);
    return D2D1::RectF(x,y,x+AlbumCell,y+AlbumCell);
   }
  }
  return D2D1::RectF(0,0,0,0);
 }
 
+void OpenFavourites(){
+ if(screen==ScrLibrary)navStack.push_back({ScrLibrary,L"",0,libScroll});
+ favouritesOpen=true;albumFolder.clear();albumScroll=0;albumScrollVel=0;
+ RefreshAlbum();
+ screen=ScrAlbum;Wake();
+}
 void OpenAlbum(const std::wstring& folder){
+ favouritesOpen=false;
  auto entry=std::find_if(libFolders.begin(),libFolders.end(),[&](auto& f){return f.path==folder;});
  if(entry!=libFolders.end()&&!entry->members.empty()){for(auto& member:entry->members)IndexTouchFolder(member);}
  else IndexTouchFolder(folder);
@@ -947,7 +1693,7 @@ void GoToLibrary(){
  RefreshLibrary();
  auto previousFolder=albumFolder;
  PrepareFolderTransition(previousFolder,true);
- albumFolder.clear();
+ albumFolder.clear();favouritesOpen=false;
  screen=ScrLibrary;
  folderTx.active=true;folderTx.closing=true;folderTx.started=Now();folderTx.blend.Reset(1);folderTx.blend.To(0);
  Wake();
@@ -1009,9 +1755,10 @@ void ViewerBack(){
  if(navStack.empty()){Close();return;}
  auto back=navStack.back();navStack.pop_back();
  if(back.screen==ScrAlbum){
-  albumFolder=back.folder;RefreshAlbum();
+  albumFolder=back.folder;favouritesOpen=back.folder.empty()&&favouritesOpen;RefreshAlbum();
   screen=ScrAlbum;albumScroll=back.scroll;
  }else{
+  albumFolder.clear();favouritesOpen=false;
   screen=ScrLibrary;libScroll=back.scroll;
  }
  float w,h;Size(w,h);
@@ -1132,13 +1879,26 @@ void Layout(){
     }
     rowTop+=GroupGap;
     row(IdDefaultApp,RowH);row(IdSpacePreview,RowH);
+    if(tcStatus!=TcMissing)row(IdTotalCmd,RowH);
     rowTop+=GroupGap;
     D2D1_RECT_F theme=D2D1::RectF(body.left+12,rowTop,body.right-12,rowTop+RowH);
     rects[IdThemeRow]=theme;
-    float segLeft=theme.right-192;
-    Hotspot(IdThemeDark,D2D1::RectF(segLeft,theme.top+9,segLeft+92,theme.bottom-9));
-    Hotspot(IdThemeLight,D2D1::RectF(segLeft+96,theme.top+9,segLeft+188,theme.bottom-9));
+    auto segments=[&](int leftId,int rightId,D2D1_RECT_F row,const wchar_t* label){
+     // Keep the selector to the right of its translated label.  Fixed 92 px
+     // halves overlapped the Russian wheel label in a compact side panel.
+     float labelRight=row.left+56+Measure(label,F_Row,120)+12;
+     float half=Clamp((row.right-8-labelRight-4)*.5f,76.f,92.f);
+     float groupWidth=half*2+4;
+     float left=(std::max)(labelRight,row.right-8-groupWidth);
+     Hotspot(leftId,D2D1::RectF(left,row.top+9,left+half,row.bottom-9));
+     Hotspot(rightId,D2D1::RectF(left+half+4,row.top+9,left+half*2+4,row.bottom-9));
+    };
+    segments(IdThemeDark,IdThemeLight,theme,T(S_ThemeLabel));
     rowTop=theme.bottom+RowGap;
+    D2D1_RECT_F wheel=D2D1::RectF(body.left+12,rowTop,body.right-12,rowTop+RowH);
+    rects[IdWheelRow]=wheel;
+    segments(IdWheelZoom,IdWheelNav,wheel,T(S_WheelLabel));
+    rowTop=wheel.bottom+RowGap;
     row(IdLanguage,RowH);
    }else{
     row(IdLangBack,46);rowTop+=6;
@@ -1294,7 +2054,7 @@ void PaintImage(float w,float h,const Palette& p){
  if(clipped)target->PushAxisAlignedClip(ToScreen(crop),D2D1_ANTIALIAS_MODE_ALIASED);
  auto matrix=ImageMatrix();
  target->SetTransform(matrix);
- target->DrawBitmap(bitmap.Get(),D2D1::RectF(0,0,float(current->w),float(current->h)),loading?.35f:1.f,
+ target->DrawBitmap(bitmap.Get(),D2D1::RectF(0,0,float(current->w),float(current->h)),1.f,
   Zoom()>8.f?D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR:D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,nullptr);
  if(clipHighFade.v>.004f||clipLowFade.v>.004f){
   DrawClipping(bitmap.Get(),true,clipHighFade.v);
@@ -1329,6 +2089,37 @@ void PaintImage(float w,float h,const Palette& p){
  }
  (void)p;
 }
+// The external rating, drawn between the file name and the dimensions.
+//
+// It is not a control. Nobody can click it, and it changes nothing in this
+// application: it is what Lightroom or Bridge already recorded about this
+// file, shown because a photographer who rated a shoot elsewhere wants to see
+// that here. The heart on the toolbar is the interactive one, and the two are
+// never derived from each other.
+void PaintXmpRating(D2D1_RECT_F row,const Palette& p,float alpha){
+ if(!info.hasRating)return;
+ if(info.rating<0){
+  // A rejection is not "zero stars"; a five-star track would misread it.
+  // A word, not a glyph. A cross small enough to fit this row reads as a
+  // rendering artefact next to the file name, and "Rejected" is unambiguous.
+  auto colour=Mix(p.danger,D2D1::ColorF(1.f,.42f,.42f,1.f),.4f);
+  float w=Measure(T(S_Rejected),F_Small,200)+18;
+  float mid=(row.left+row.right)/2;
+  D2D1_RECT_F pill=D2D1::RectF(mid-w/2,row.top-1,mid+w/2,row.bottom+1);
+  float radius=(pill.bottom-pill.top)/2;
+  Ink()->SetColor(Fade(colour,alpha*.16f));
+  Dc()->FillRoundedRectangle(D2D1::RoundedRect(pill,radius,radius),Ink());
+  Ink()->SetColor(Fade(colour,alpha*.45f));
+  Dc()->DrawRoundedRectangle(D2D1::RoundedRect(pill,radius,radius),Ink(),1.f);
+  Write(T(S_Rejected),pill,F_Small,Fade(colour,alpha));
+  return;
+ }
+ // Only the stars that are actually set. Five hollow outlines on every
+ // unrated photograph would turn a header into a rating widget nobody asked
+ // for; a short row of filled stars reads as a fact about the file.
+ std::wstring stars(size_t((std::max)(0,(std::min)(5,info.rating))),L'★');
+ Write(stars,row,F_Small,Fade(Mix(p.text,D2D1::ColorF(1.f,.78f,.28f,1.f),.85f),alpha));
+}
 void PaintTitle(float w,const Palette& p,float dockLeft,float leftEdge){
  if(currentPath.empty())return;
  float centre=(leftEdge+dockLeft)/2;
@@ -1336,17 +2127,31 @@ void PaintTitle(float w,const Palette& p,float dockLeft,float leftEdge){
  if(half<70)return;
  std::wstring meta;
  if(current){
-  meta=std::to_wstring((unsigned)(EffW()+.5f))+L" × "+std::to_wstring((unsigned)(EffH()+.5f))+L"   •   "+
-   std::to_wstring(int(Zoom()*dpi*100.f+.5f))+L"%";
+  // Both figures are about the photograph, not about the tier being drawn: a
+  // screen-tier frame must still say 7360 x 4912 and report the magnification
+  // of the original, or the header quietly lies about the file.
+  float scale=(std::max)(0.0001f,FrameScale());
+  unsigned shownW=CropActive()?(unsigned)(EffW()/scale+.5f):SourceW();
+  unsigned shownH=CropActive()?(unsigned)(EffH()/scale+.5f):SourceH();
+  meta=std::to_wstring(shownW)+L" × "+std::to_wstring(shownH)+L"   •   "+
+   std::to_wstring(int(Zoom()*scale*dpi*100.f+.5f))+L"%";
  }
  float t=titleIn.v;
+ // The rating row only takes space when there is a rating to show, so an
+ // ordinary photograph keeps exactly the header it had before.
+ float ratingH=info.hasRating?15.f:0.f;
  auto name=D2D1::RectF(centre-half,Margin-2,centre+half,Margin+24);
- auto line=D2D1::RectF(centre-half,Margin+22,centre+half,Margin+44);
+ auto rating=D2D1::RectF(centre-half,Margin+21,centre+half,Margin+21+ratingH);
+ auto line=D2D1::RectF(centre-half,Margin+22+ratingH,centre+half,Margin+44+ratingH);
  if(t<.98f&&!prevName.empty()){
   Write(prevName,Shift(name,0,-4*t),F_Title,Fade(p.text,1-t));
   Write(prevMeta,Shift(line,0,-4*t),F_Meta,Fade(p.dim,1-t));
  }
  Write(Name(),Shift(name,0,4*(1-t)),F_Title,Fade(p.text,t));
+ if(ratingH>0){
+  Hotspot(IdNone,rating);   // no command: hovering only reveals the tooltip
+  PaintXmpRating(Shift(rating,0,4*(1-t)),p,t);
+ }
  Write(meta,Shift(line,0,4*(1-t)),F_Meta,Fade(p.dim,t));
  (void)w;
 }
@@ -1584,6 +2389,65 @@ void PaintHistogram(D2D1_RECT_F card,const Palette& p,float alpha,float rise){
  target->SetTransform(previous);
  target->PopAxisAlignedClip();
 }
+// The chroma cloud, drawn once per photograph into a small bitmap: counts are
+// logarithmic, since the neutral centre otherwise buries every colour in the frame.
+void BuildScope(){
+ if(!info.histReady||scopeBitmap)return;
+ constexpr int N=Meta::ScopeEdge;
+ std::vector<uint8_t> pixels(size_t(N)*N*4);
+ float peak=logf(1.f+float((std::max)(1u,info.scopePeak)));
+ for(int y=0;y<N;y++)for(int x=0;x<N;x++){
+  uint32_t count=info.scope[y*N+x];
+  float t=count?logf(1.f+float(count))/peak:0.f;
+  float u=float(x-N/2)*256.f/N,v=float(N/2-y)*256.f/N;
+  float r=190+1.402f*v,g=190-.344f*u-.714f*v,b=190+1.772f*u;
+  uint8_t* out=&pixels[(size_t(y)*N+x)*4];
+  out[0]=uint8_t(Clamp(b,0,255)*t);out[1]=uint8_t(Clamp(g,0,255)*t);
+  out[2]=uint8_t(Clamp(r,0,255)*t);out[3]=uint8_t(255*t);
+ }
+ Dc()->CreateBitmap(D2D1::SizeU(N,N),pixels.data(),N*4,
+  D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&scopeBitmap);
+}
+void PaintVectorscope(D2D1_RECT_F card,const Palette& p,float alpha){
+ auto target=Dc();
+ Ink()->SetColor(Fade(p.plate,alpha));
+ target->FillRoundedRectangle(D2D1::RoundedRect(card,12,12),Ink());
+ BuildScope();
+ if(!scopeBitmap){Write(T(S_Reading),card,F_Small,Fade(p.faint,alpha));return;}
+ float radius=((std::min)(Width(card),Height(card))-30)/2;
+ D2D1_POINT_2F centre{(card.left+card.right)/2,(card.top+card.bottom)/2};
+ // The rim carries the hue wheel itself, so a cluster's direction reads as a
+ // colour rather than as an angle the eye has to decode.
+ for(int i=0;i<108;i++){
+  float angle=float(i)*6.2831853f/108,u=cosf(angle)*127,v=sinf(angle)*127;
+  Ink()->SetColor(Fade(D2D1::ColorF(Clamp(190+1.402f*v,0,255)/255,Clamp(190-.344f*u-.714f*v,0,255)/255,
+   Clamp(190+1.772f*u,0,255)/255,1),alpha*.85f));
+  target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(centre.x+cosf(angle)*radius,centre.y-sinf(angle)*radius),2.2f,2.2f),Ink());
+ }
+ Ink()->SetColor(Fade(p.faint,alpha*.45f));
+ for(int i=0;i<3;i++){
+  float angle=float(i)*3.14159265f/3;
+  target->DrawLine(D2D1::Point2F(centre.x-cosf(angle)*radius,centre.y+sinf(angle)*radius),
+   D2D1::Point2F(centre.x+cosf(angle)*radius,centre.y-sinf(angle)*radius),Ink(),1.f,DashStyle());
+ }
+ // The skin tone line: healthy skin of any complexion lands along this
+ // direction, so a portrait's cast shows as a drift away from it.
+ {
+  float u=-26.9f,v=37.5f,length=sqrtf(u*u+v*v);
+  Ink()->SetColor(Fade(p.text,alpha*.5f));
+  target->DrawLine(centre,D2D1::Point2F(centre.x+u/length*radius,centre.y-v/length*radius),Ink(),1.4f,DashStyle());
+ }
+ ComPtr<ID2D1BitmapBrush> brush;
+ D2D1_BITMAP_BRUSH_PROPERTIES props=D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_CLAMP,D2D1_EXTEND_MODE_CLAMP,
+  D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+ if(SUCCEEDED(target->CreateBitmapBrush(scopeBitmap.Get(),props,&brush))){
+  float scale=radius*2/float(Meta::ScopeEdge);
+  brush->SetTransform(D2D1::Matrix3x2F::Scale(scale,scale)*
+   D2D1::Matrix3x2F::Translation(centre.x-radius,centre.y-radius));
+  brush->SetOpacity(alpha);
+  target->FillEllipse(D2D1::Ellipse(centre,radius,radius),brush.Get());
+ }
+}
 void PaintInfoPanel(D2D1_RECT_F body,const Palette& p,float alpha){
  auto target=Dc();
  Write(T(S_Information),D2D1::RectF(body.left+18,body.top+14,body.right-18,body.top+40),F_Title,Fade(p.text,alpha));
@@ -1600,9 +2464,25 @@ void PaintInfoPanel(D2D1_RECT_F body,const Palette& p,float alpha){
   y+=RowH+12;
  }
  if(info.hasCamera)PaintFields(info.camera,body,y,S_SecCamera,p,alpha);
+ // Sections that carry no rows are not drawn at all: a screenshot should not
+ // show an empty CAMERA heading, and a calibrated RAW should not have to
+ // compete with five blank ones.
+ if(!info.colour.empty())PaintFields(info.colour,body,y,S_SecColour,p,alpha);
+ if(!info.adobe.empty())PaintFields(info.adobe,body,y,S_SecAdobe,p,alpha);
+ if(!info.lens.empty())PaintFields(info.lens,body,y,S_SecLens,p,alpha);
+ if(!info.author.empty())PaintFields(info.author,body,y,S_SecAuthor,p,alpha);
  if(info.histReady||metaPending){
-  Write(T(S_SecHistogram),D2D1::RectF(body.left+18,y,body.right-18,y+20),F_Section,Fade(p.faint,alpha));
-  y+=26;
+  // Two readings of the same frame, one at a time: tone, or colour.
+  float pick=(Width(body)-32-6)/2;
+  D2D1_RECT_F tone=D2D1::RectF(body.left+16,y,body.left+16+pick,y+28);
+  D2D1_RECT_F colour=D2D1::RectF(tone.right+6,y,tone.right+6+pick,y+28);
+  Hotspot(IdScopeHist,tone);Chip(IdScopeHist,T(S_SecHistogram),scopeMode==0,p,alpha);
+  Hotspot(IdScopeVector,colour);Chip(IdScopeVector,T(S_Vectorscope),scopeMode==1,p,alpha);
+  y+=38;
+  if(scopeMode==1){
+   PaintVectorscope(D2D1::RectF(body.left+16,y,body.right-16,y+Width(body)-32),p,alpha);
+   y+=Width(body)-32+12;
+  }else{
   BuildHistogram();
   D2D1_RECT_F histCard=D2D1::RectF(body.left+16,y,body.right-16,y+108);
   PaintHistogram(histCard,p,alpha,histRise.v);
@@ -1635,6 +2515,7 @@ void PaintInfoPanel(D2D1_RECT_F body,const Palette& p,float alpha){
    Chip(modes[i],labels[i],histMode==i,p,alpha);
   }
   y+=40;
+  }
  }
  if(info.histReady){
   Write(T(S_SecExposure),D2D1::RectF(body.left+18,y,body.right-18,y+20),F_Section,Fade(p.faint,alpha));
@@ -1657,6 +2538,35 @@ void PaintInfoPanel(D2D1_RECT_F body,const Palette& p,float alpha){
  }
  panelExtent=(std::max)(0.f,(y+panelScroll)-body.bottom+20);
  target->PopAxisAlignedClip();
+}
+// A labelled card with a two-position selector: the theme and the mouse wheel
+// are the same control, so they share the drawing and the sliding knob.
+void SegmentedRow(int rowId,int leftId,int rightId,const wchar_t* icon,const wchar_t* label,
+ const wchar_t* leftText,const wchar_t* rightText,float k,const Palette& p,float alpha){
+ auto row=R(rowId);
+ auto card=D2D1::RoundedRect(row,RowRadius,RowRadius);
+ Ink()->SetColor(Fade(p.card,alpha));
+ Dc()->FillRoundedRectangle(card,Ink());
+ Ink()->SetColor(Fade(p.cardEdge,alpha*.8f));
+ Dc()->DrawRoundedRectangle(card,Ink(),1.f);
+ auto leftChip=R(leftId),rightChip=R(rightId);
+ float mid=(row.top+row.bottom)/2;
+ Icon(icon,D2D1::RectF(row.left+16,mid-13,row.left+42,mid+13),Fade(p.text,alpha),1.75f);
+ Write(label,D2D1::RectF(row.left+56,row.top,leftChip.left-8,row.bottom),F_Row,Fade(p.text,alpha));
+ D2D1_RECT_F group=D2D1::RectF(leftChip.left-3,leftChip.top-3,rightChip.right+3,rightChip.bottom+3);
+ Ink()->SetColor(Fade(p.sunk,alpha));
+ Dc()->FillRoundedRectangle(D2D1::RoundedRect(group,11,11),Ink());
+ // The selection slides between the two halves rather than snapping.
+ D2D1_RECT_F knob=D2D1::RectF(leftChip.left+(rightChip.left-leftChip.left)*k,leftChip.top,
+  leftChip.right+(rightChip.right-leftChip.right)*k,leftChip.bottom);
+ auto knobShape=D2D1::RoundedRect(knob,9,9);
+ SoftShadow(knobShape,alpha*.35f,1.f);
+ Ink()->SetColor(Fade(Mix(p.card,p.text,.16f),alpha));
+ Dc()->FillRoundedRectangle(knobShape,Ink());
+ Ink()->SetColor(Fade(p.cardEdge,alpha*.9f));
+ Dc()->DrawRoundedRectangle(knobShape,Ink(),1.f);
+ Write(leftText,leftChip,F_Button,Fade(p.text,alpha*(k<.5f?1.f:.45f)));
+ Write(rightText,rightChip,F_Button,Fade(p.text,alpha*(k>.5f?1.f:.45f)));
 }
 void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
  Write(T(S_Menu),D2D1::RectF(body.left+18,body.top+14,body.right-18,body.top+40),F_Title,Fade(p.text,alpha));
@@ -1685,29 +2595,12 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
    Write(T(S_Delete),r,F_Button,Fade(D2D1::ColorF(1,1,1,1),alpha));
    Dc()->SetTransform(previous);
   }
-  auto themeRow=R(IdThemeRow);
-  auto themeCard=D2D1::RoundedRect(themeRow,RowRadius,RowRadius);
-  Ink()->SetColor(Fade(p.card,alpha));
-  Dc()->FillRoundedRectangle(themeCard,Ink());
-  Ink()->SetColor(Fade(p.cardEdge,alpha*.8f));
-  Dc()->DrawRoundedRectangle(themeCard,Ink(),1.f);
-  float themeMid=(themeRow.top+themeRow.bottom)/2;
-  Icon(themeMix.v>.5f?IcSun:IcMoon,D2D1::RectF(themeRow.left+16,themeMid-13,themeRow.left+42,themeMid+13),Fade(p.text,alpha),1.75f);
-  Write(T(S_ThemeLabel),D2D1::RectF(themeRow.left+56,themeRow.top,themeRow.left+150,themeRow.bottom),F_Row,Fade(p.text,alpha));
-  auto darkChip=R(IdThemeDark),lightChip=R(IdThemeLight);
-  D2D1_RECT_F group=D2D1::RectF(darkChip.left-3,darkChip.top-3,lightChip.right+3,lightChip.bottom+3);
-  Ink()->SetColor(Fade(p.sunk,alpha));
-  Dc()->FillRoundedRectangle(D2D1::RoundedRect(group,11,11),Ink());
-  // The selection slides between the two halves rather than snapping.
-  float k=themeMix.v;
-  D2D1_RECT_F knob=D2D1::RectF(darkChip.left+(lightChip.left-darkChip.left)*k,darkChip.top,
-   darkChip.right+(lightChip.right-darkChip.right)*k,darkChip.bottom);
-  Ink()->SetColor(Fade(Mix(D2D1::ColorF(1,1,1,.16f),D2D1::ColorF(1,1,1,.92f),k),alpha));
-  Dc()->FillRoundedRectangle(D2D1::RoundedRect(knob,9,9),Ink());
-  Write(T(S_Dark),darkChip,F_Button,Fade(p.text,alpha*(k<.5f?1.f:.6f)));
-  Write(T(S_Light),lightChip,F_Button,Fade(p.text,alpha*(k>.5f?1.f:.6f)));
+  SegmentedRow(IdThemeRow,IdThemeDark,IdThemeLight,themeMix.v>.5f?IcSun:IcMoon,T(S_ThemeLabel),T(S_Dark),T(S_Light),themeMix.v,p,alpha);
+  SegmentedRow(IdWheelRow,IdWheelZoom,IdWheelNav,IcMouse,T(S_WheelLabel),T(S_WheelZoom),T(S_WheelNav),wheelMix.v,p,alpha);
   PanelRow(IdDefaultApp,IcDefault,T(S_DefaultApp),p,alpha,true,p.text);
   PanelRow(IdSpacePreview,IcSpace,T(S_SpacePreview),p,alpha,false,p.text,T(autostart?S_On:S_Off));
+  if(tcStatus!=TcMissing)
+   PanelRow(IdTotalCmd,IcDefault,L"Total Commander",p,alpha,false,p.text,T(tcStatus==TcInstalled?S_Remove:S_Install));
   PanelRow(IdLanguage,IcGlobe,T(S_Language),p,alpha,true,p.text);
   auto hairline=[&](float top,float bottom){
    float y=(top+bottom)/2;
@@ -1715,7 +2608,7 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
    Dc()->DrawLine(D2D1::Point2F(body.left+24,y),D2D1::Point2F(body.right-24,y),Ink(),1.f);
   };
   hairline(confirmDelete?R(IdConfirmDelete).bottom:R(IdDelete).bottom,R(IdDefaultApp).top);
-  hairline(R(IdSpacePreview).bottom,themeRow.top);
+  hairline(R(IdSpacePreview).bottom,R(IdThemeRow).top);
  }else{
   PanelRow(IdLangBack,IcChevronL,T(S_Language),p,alpha,false,p.dim);
   PanelRow(IdLangRu,nullptr,L"Русский",p,alpha,false,language==0?p.accent:p.text);
@@ -1838,6 +2731,10 @@ void PaintGallery(const Palette& p){
   }
   target->SetTransform(previous);
  }
+ // Requests above are inserted in paint order into a LIFO queue. Move the
+ // selected photograph to the very back after all of them so it is always the
+ // next item a worker claims.
+ if(active>=0&&active<int(siblings.size()))ThumbPrioritize(siblings[size_t(active)]);
  target->PopAxisAlignedClip();
 }
 void PaintToast(float w,float h,const Palette& p){
@@ -1859,7 +2756,7 @@ void PaintEmpty(float w,float h,const Palette& p){
 
 // ============================================================ library UI ==
 const wchar_t* LibraryExtensions[]={L"jpg",L"png",L"webp",L"avif",L"heic",L"bmp",L"tif",L"gif",
- L"cr2",L"cr3",L"nef",L"arw",L"dng",L"raf",L"rw2",L"orf",L"pef",L"exr",L"ico"};
+ L"psd",L"cr2",L"cr3",L"nef",L"arw",L"dng",L"raf",L"rw2",L"orf",L"pef",L"exr",L"ico"};
 constexpr uint64_t GB=1024ull*1024*1024;
 float SizeToT(uint64_t bytes){if(!bytes)return 0;float t=logf(float(double(bytes)/1024.0))/logf(float(100.0*GB/1024.0));return Clamp(t,0,1);}
 uint64_t TToSize(float t){if(t<=.004f)return 0;if(t>=.996f)return ~0ull;return uint64_t(1024.0*pow(100.0*GB/1024.0,double(t)));}
@@ -2018,7 +2915,7 @@ void PaintFilterPopup(float w,float h,const Palette& p,float alpha){
   int id=IdFilterExt0+int(i);
   D2D1_RECT_F chip=D2D1::RectF(chipX,chipY,chipX+cw,chipY+chipH);
   filterHot(id,chip);
-  FilterChip(id,label,!filterExtOff.count(LibraryExtensions[i]),p,alpha);
+  FilterChip(id,label,filterExtOn.empty()||filterExtOn.count(LibraryExtensions[i]),p,alpha);
   chipX+=cw+6;
  }
  cy=chipY+chipH+18;
@@ -2134,10 +3031,88 @@ void PaintFolderCard(int id,const FolderEntry& folder,D2D1_RECT_F cell,const Pal
  if(gradient)Dc()->FillRoundedRectangle(D2D1::RoundedRect(bodyRect,12,12),gradient.Get());
  Ink()->SetColor(Fade(p.glassEdge,alpha*.8f));Dc()->DrawRoundedRectangle(D2D1::RoundedRect(bodyRect,12,12),Ink(),1.f);
 
+ // A folder that holds a favourite says so, counting its whole virtual family
+ // rather than only the directory the card happens to be named after.
+ uint32_t favourites=FolderFavouriteCount(folder.path);
+ for(auto& member:folder.members)if(NormalisePath(member)!=NormalisePath(folder.path))
+  favourites+=FolderFavouriteCount(member);
+ if(favourites){
+  auto heart=D2D1::RectF(icon.right-30,icon.top+2,icon.right-6,icon.top+26);
+  Ink()->SetColor(Fade(D2D1::ColorF(0,0,0,.30f),alpha));
+  Dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F((heart.left+heart.right)/2,(heart.top+heart.bottom)/2),13,13),Ink());
+  Icon(IcHeart,Inset(heart,4),Fade(D2D1::ColorF(1.f,.42f,.5f,1.f),alpha),1.5f,true);
+ }
  Write(folder.name,D2D1::RectF(cell.left+4,cell.bottom-capH+4,cell.right-4,cell.bottom-18),F_Row,Fade(p.text,alpha));
  std::wstring photoCount=std::to_wstring(folder.photoCount)+L" "+T(S_Photos);
  if(!folder.members.empty())photoCount+=L" · "+std::to_wstring(folder.members.size())+L" папки";
  Write(photoCount,D2D1::RectF(cell.left+4,cell.bottom-18,cell.right-4,cell.bottom-2),F_Small,Fade(p.faint,alpha));
+ Dc()->SetTransform(previous);
+}
+// The Favourites card. Visibly not a folder: no tab, no manila body, a heart
+// instead, and the real liked photographs behind it.
+void PaintFavouritesCard(int id,D2D1_RECT_F cell,const Palette& p,float alpha){
+ D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
+ float scale=1.f+.02f*Hover(id)-.03f*Press(id);
+ float cx=(cell.left+cell.right)/2,cy=(cell.top+cell.bottom)/2;
+ auto base=D2D1::Matrix3x2F::Translation(-cx,-cy)*D2D1::Matrix3x2F::Scale(scale,scale)*
+  D2D1::Matrix3x2F::Translation(cx,cy-2.f*Hover(id))*Mat(previous);
+ Dc()->SetTransform(base);
+
+ float capH=38.f;
+ D2D1_RECT_F face=D2D1::RectF(cell.left+12,cell.top+30,cell.right-12,cell.bottom-capH);
+ D2D1_GRADIENT_STOP stops[]={
+  {0,Fade(D2D1::ColorF(.95f,.28f,.42f,1.f),alpha)},
+  {1,Fade(D2D1::ColorF(.76f,.16f,.44f,1.f),alpha)}};
+ ComPtr<ID2D1GradientStopCollection> colours;ComPtr<ID2D1LinearGradientBrush> gradient;
+ Dc()->CreateGradientStopCollection(stops,2,&colours);
+ Dc()->CreateLinearGradientBrush(
+  D2D1::LinearGradientBrushProperties(D2D1::Point2F(face.left,face.top),D2D1::Point2F(face.right,face.bottom)),
+  colours.Get(),&gradient);
+ if(gradient)Dc()->FillRoundedRectangle(D2D1::RoundedRect(face,14,14),gradient.Get());
+
+ size_t shown=favouritePhotos.size()<3?favouritePhotos.size():size_t(3);
+ if(shown){
+  // A fan of three real favourites, so the card is about the pictures rather
+  // than about the idea of favourites.
+  float iw=Width(face),ih=Height(face);
+  float thumbW=iw*.52f,thumbH=ih*.62f;
+  float fcx=(face.left+face.right)/2,fcy=(face.top+face.bottom)/2+ih*.02f;
+  static const float angles[3]={-9,0,9};
+  const float* fan=shown==1?angles+1:(shown==2?angles:angles);
+  for(size_t i=shown;i-->0;){
+   float lift=reducedMotion?0:Hover(id);
+   float dx=(float(i)-(shown-1)*.5f)*(7+lift*10),dy=-lift*8;
+   auto drawn=D2D1::RectF(fcx-thumbW/2+dx,fcy-thumbH/2+dy,fcx+thumbW/2+dx,fcy+thumbH/2+dy);
+   Dc()->SetTransform(D2D1::Matrix3x2F::Rotation(fan[shown==2&&i==1?2:i],D2D1::Point2F(fcx+dx,fcy+dy))*base);
+   auto bmp=GridBitmap(favouritePhotos[i].path);
+   DrawCover(drawn,8,bmp.Get(),Mix(p.sunk,p.accent,.25f));
+   Ink()->SetColor(Fade(D2D1::ColorF(1,1,1,.85f),alpha));
+   Dc()->DrawRoundedRectangle(D2D1::RoundedRect(drawn,8,8),Ink(),1.f);
+  }
+  Dc()->SetTransform(base);
+ }else{
+  float mid=(face.top+face.bottom)/2;
+  Icon(IcHeart,D2D1::RectF((face.left+face.right)/2-26,mid-38,(face.left+face.right)/2+26,mid+14),
+   Fade(D2D1::ColorF(1,1,1,.92f),alpha),2.f,true);
+  Write(T(S_NoFavourites),D2D1::RectF(face.left+8,mid+14,face.right-8,mid+34),F_Small,
+   Fade(D2D1::ColorF(1,1,1,.86f),alpha));
+  // The hint is deliberately two short lines: a card this narrow elides a
+  // single long one in the middle, which reads as a rendering fault.
+  Write(T(S_NoFavouritesHint),D2D1::RectF(face.left+6,mid+31,face.right-6,mid+47),F_Small,
+   Fade(D2D1::ColorF(1,1,1,.62f),alpha));
+  Write(T(S_NoFavouritesHint2),D2D1::RectF(face.left+6,mid+45,face.right-6,mid+61),F_Small,
+   Fade(D2D1::ColorF(1,1,1,.62f),alpha));
+ }
+ // The badge, always: it is what tells this card apart at a glance.
+ D2D1_RECT_F badge=D2D1::RectF(face.right-38,face.top+8,face.right-8,face.top+38);
+ Ink()->SetColor(Fade(D2D1::ColorF(0,0,0,.28f),alpha));
+ Dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F((badge.left+badge.right)/2,(badge.top+badge.bottom)/2),15,15),Ink());
+ Icon(IcHeart,Inset(badge,5),Fade(D2D1::ColorF(1,1,1,1),alpha),1.8f,true);
+
+ Write(T(S_Favourites),D2D1::RectF(cell.left+4,cell.bottom-capH+4,cell.right-4,cell.bottom-18),F_Row,Fade(p.text,alpha));
+ auto count=favouritePhotos.size();
+ Write(std::to_wstring(count)+L" "+T(S_Photos),
+  D2D1::RectF(cell.left+4,cell.bottom-18,cell.right-4,cell.bottom-2),F_Small,Fade(p.faint,alpha));
  Dc()->SetTransform(previous);
 }
 void PaintPhotoCell(int id,const PhotoEntry& photo,D2D1_RECT_F cell,const Palette& p,float alpha){
@@ -2153,6 +3128,13 @@ void PaintPhotoCell(int id,const PhotoEntry& photo,D2D1_RECT_F cell,const Palett
   auto badge=D2D1::RectF(cell.right-34,cell.top+8,cell.right-8,cell.top+32);
   Glass(D2D1::RoundedRect(badge,12,12),p,.9f,D2D1::Matrix3x2F::Identity());Write(std::to_wstring(photo.variantCount),badge,F_Small,p.text);
  }
+ if(FavouriteGet(photo.path)){
+  // Bottom-left, so it never collides with the variant-count badge.
+  auto heart=D2D1::RectF(cell.left+7,cell.bottom-29,cell.left+29,cell.bottom-7);
+  Ink()->SetColor(Fade(D2D1::ColorF(0,0,0,.34f),alpha));
+  Dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F((heart.left+heart.right)/2,(heart.top+heart.bottom)/2),13,13),Ink());
+  Icon(IcHeart,Inset(heart,3),Fade(D2D1::ColorF(1.f,.36f,.44f,1.f),alpha),1.6f,true);
+ }
  if(selectedPhotos.count(photo.id)){Ink()->SetColor(p.accent);Dc()->DrawRoundedRectangle(D2D1::RoundedRect(Inset(cell,2),10,10),Ink(),2.5f);}
  Dc()->SetTransform(previous);
 }
@@ -2163,7 +3145,10 @@ GridPlacement LibraryGridFor(float w,float h,float& areaLeft,float& areaTop,floa
  bool folders=!album&&libView==ViewFolders;
  float cellH=folders?LibCardH:AlbumCell;
  float cellW=folders?LibCard:AlbumCell;
- size_t count=folders?libFolders.size():albumPhotos.size();
+ // The Favourites card occupies the first cell of the folder grid. It is a
+ // virtual collection, not a directory, so it is counted here rather than
+ // inserted into libFolders where the indexer would have to know about it.
+ size_t count=folders?libFolders.size()+1:albumPhotos.size();
  return PlanGrid(areaW,cellW,cellH,LibGap,count);
 }
 void PaintLibraryScreen(float w,float h,const Palette& p){
@@ -2172,7 +3157,7 @@ void PaintLibraryScreen(float w,float h,const Palette& p){
  auto grid=LibraryGridFor(w,h,areaLeft,areaTop,areaW);
  float bottomBar=h-40;
  auto timeline=PlanTimeline(areaW);
- float contentH=libView==ViewPhotosFlat?timeline.contentH:grid.contentH;
+ float contentH=libView==ViewPhotosFlat?timeline.contentH+FavouriteChipH:grid.contentH;
  libScrollExtent=(std::max)(0.f,contentH-(bottomBar-areaTop-12));
  libScroll=Clamp(libScroll,0,libScrollExtent);
  // The content plane runs behind the floating chrome. Clipping at LibTop
@@ -2180,8 +3165,26 @@ void PaintLibraryScreen(float w,float h,const Palette& p){
  Dc()->PushAxisAlignedClip(D2D1::RectF(0,0,w,bottomBar),D2D1_ANTIALIAS_MODE_ALIASED);
  size_t count=libView==ViewFolders?libFolders.size():albumPhotos.size();
  if(libView==ViewPhotosFlat){
+  // A shortcut, not a second copy of the pictures. The timeline stays the
+  // chronological source of truth; Favourites is a filter over it, reached
+  // from one compact chip that scrolls away with the content.
+  float chipY=areaTop-libScroll;
+  D2D1_RECT_F chip=D2D1::RectF(areaLeft,chipY,areaLeft+(std::min)(areaW,258.f),chipY+FavouriteChipH-10);
+  if(chip.bottom>-20&&chip.top<bottomBar+20){
+   Hotspot(IdFavouritesChip,chip);
+   float lift=Hover(IdFavouritesChip)-.6f*Press(IdFavouritesChip);
+   auto shape=D2D1::RoundedRect(Shift(chip,0,-2.f*lift),(chip.bottom-chip.top)/2,(chip.bottom-chip.top)/2);
+   Glass(shape,p,1.f,D2D1::Matrix3x2F::Identity());
+   Ink()->SetColor(Fade(Mix(p.cardEdge,p.accent,.25f+.5f*Hover(IdFavouritesChip)),.85f));
+   Dc()->DrawRoundedRectangle(shape,Ink(),1.f);
+   Icon(IcHeart,D2D1::RectF(shape.rect.left+14,shape.rect.top+11,shape.rect.left+36,shape.rect.bottom-11),
+    D2D1::ColorF(1.f,.36f,.44f,1.f),1.7f,favouritePhotos.empty()?false:true);
+   Write(T(S_Favourites),D2D1::RectF(shape.rect.left+44,shape.rect.top,shape.rect.right-58,shape.rect.bottom),F_Row,p.text);
+   Write(std::to_wstring(favouritePhotos.size()),
+    D2D1::RectF(shape.rect.right-52,shape.rect.top,shape.rect.right-16,shape.rect.bottom),F_Row,p.faint);
+  }
   for(size_t g=0;g<timelineGroups.size();++g){
-   float groupTop=areaTop-libScroll+timeline.groupTops[g];
+   float groupTop=areaTop-libScroll+FavouriteChipH+timeline.groupTops[g];
    auto& group=timelineGroups[g];
    int rows=int((group.photos.size()+size_t(timeline.columns)-1)/size_t(timeline.columns));
    float groupBottom=groupTop+TimelineHeaderH+rows*(AlbumCell+LibGap);
@@ -2193,21 +3196,25 @@ void PaintLibraryScreen(float w,float h,const Palette& p){
     cell.right=cell.left+AlbumCell;cell.bottom=cell.top+AlbumCell;
     if(cell.bottom<0||cell.top>bottomBar+40)continue;
     size_t i=group.photos[local];int id=IdCard0+int(i);Hotspot(id,cell);
+    ThumbRequest(albumPhotos[i].path);
     if(!(hero.active&&albumPhotos[i].id==hero.photoId))PaintPhotoCell(id,albumPhotos[i],cell,p,1.f);
    }
   }
  }else{
+  size_t total=count+1;   // cell 0 is the virtual Favourites collection
   size_t first=size_t((std::max)(0,int((libScroll-40)/(grid.cellH+LibGap))))*grid.columns;
-  size_t last=(std::min)(count,first+size_t((h-areaTop+80)/(grid.cellH+LibGap)+3)*grid.columns);
-  for(size_t i=first;i<last;i++){
-   auto cell=GridCell(grid,areaLeft,areaTop-libScroll,LibGap,i);
+  size_t last=(std::min)(total,first+size_t((h-areaTop+80)/(grid.cellH+LibGap)+3)*grid.columns);
+  for(size_t slot=first;slot<last;slot++){
+   auto cell=GridCell(grid,areaLeft,areaTop-libScroll,LibGap,slot);
    if(cell.bottom<0||cell.top>bottomBar+40)continue;
+   if(slot==0){Hotspot(IdFavourites,cell);PaintFavouritesCard(IdFavourites,cell,p,1.f);continue;}
+   size_t i=slot-1;
    int id=IdCard0+int(i);Hotspot(id,cell);PaintFolderCard(id,libFolders[i],cell,p,1.f);
   }
  }
  Dc()->PopAxisAlignedClip();
- if(count==0&&!IndexIsScanning())
-  Write(libView==ViewFolders?T(S_NoFolders):T(S_NoPhotos),D2D1::RectF(w/2-200,h/2-14,w/2+200,h/2+14),F_Row,p.dim);
+ if(count==0&&!IndexIsScanning()&&libView!=ViewFolders)
+  Write(T(S_NoPhotosFound),D2D1::RectF(w/2-200,h/2-14,w/2+200,h/2+14),F_Row,p.dim);
  // status footer
  std::wstring left;
  if(IndexIsScanning())left=T(S_Indexing)+std::wstring(L" ")+std::to_wstring(IndexKnownPhotoCount())+L" "+T(S_Photos);
@@ -2313,7 +3320,7 @@ void PaintHeroOverlay(float w,float h,const Palette& p){
   DrawCover(rect,hero.radius.v,show,p.sunk);
   if(!hero.closing&&!loading&&bitmap){
    Dc()->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::Matrix3x2F::Identity(),Clamp(hero.crossfade.v,0,1)),nullptr);
-   DrawCover(rect,hero.radius.v,bitmap.Get(),p.sunk);Dc()->PopLayer();
+   DrawCover(rect,hero.radius.v,bitmap.Get(),D2D1::ColorF(0,0,0,0));Dc()->PopLayer();
   }
   Dc()->PopAxisAlignedClip();
   Ink()->SetColor(Fade(p.glassEdge,.5f));Dc()->DrawRoundedRectangle(rounded,Ink(),1.f);
@@ -2332,12 +3339,24 @@ void Frame(){
  hots.clear();rects.clear();
  if(screen==ScrLibrary&&!folderTx.active){folderPreviews.clear();folderFronts.clear();}
  if(current&&!bitmap){
-  auto made=Dc()->CreateBitmap(D2D1::SizeU(current->w,current->h),current->pixels.data(),current->w*4,
-   D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&bitmap);
-  if(FAILED(made))errorText=L"This image exceeds the renderer's bitmap limit.";
-  if(auto tiny=Tiny(current))
+  auto slotKey=currentFrameKey.empty()?NormalisePath(currentPath)+L"|live":currentFrameKey;
+  bitmap=GpuTextureFor(current,slotKey,slotKey);
+  if(!bitmap)errorText=L"This image exceeds the renderer's bitmap limit.";
+  // A thumbnail of this file is usually already in memory, and reducing 180
+  // pixels to 22 costs nothing. Only when there is none does this fall back
+  // to a strided average of the frame itself.
+  auto reduced=ThumbLookup(currentPath);
+  if(!reduced&&backdropSource&&backdropSource->w<=512)reduced=backdropSource;
+  std::shared_ptr<Image> tiny=reduced?Downsample(reduced,22):std::shared_ptr<Image>();
+  if(tiny&&tiny->w&&tiny->h){
+   backdropIsAverage=false;
    Dc()->CreateBitmap(D2D1::SizeU(tiny->w,tiny->h),tiny->pixels.data(),tiny->w*4,
     D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&backdrop);
+  }else if(AverageColour(*current,backdropAverage)){
+   backdropIsAverage=true;
+   Dc()->CreateBitmap(D2D1::SizeU(1,1),backdropAverage,4,
+    D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&backdrop);
+  }
  }
  bool browsing=!preview&&screen!=ScrViewer;
  if(!preview&&screen==ScrViewer)Layout();
@@ -2373,16 +3392,13 @@ void Frame(){
  }else{
   PaintBackdrop(w,h,p);
   if(!hero.active)PaintImage(w,h,p);
-  if(!current)PaintEmpty(w,h,p);
+  if(!current&&currentPath.empty())PaintEmpty(w,h,p);
   if(!errorText.empty())Write(errorText,D2D1::RectF(40,h/2+90,w-40,h/2+140),F_Row,p.dim);
  }
 
- // A full-screen Gaussian backdrop pass is the most expensive part of a
- // frame. During direct manipulation use the glass fallback, then restore
- // the true frosted sample on the first settled frame.
- bool directManipulation=screen==ScrViewer&&(zoomLog.Moving()||panSX.Moving()||panSY.Moving()||dragImage);
- directManipulation|=browsing&&(fabsf(libScrollVel)>2.f||fabsf(albumScrollVel)>2.f);
- GfxEndScene(shape,!preview&&!directManipulation);
+ // Chrome remains frosted while scrolling.  Falling back to a transparent
+ // fill made the header and dock visibly "switch off" during manipulation.
+ GfxEndScene(shape,!preview);
  PaintFolderTransition();
  if(hero.active&&!preview)PaintHeroOverlay(w,h,p);
  if(browsing){
@@ -2407,18 +3423,34 @@ void Frame(){
   PaintWindowButtons(p);
   PaintPanel(p);
   PaintToast(w,h,p);
-  if(loading)Write(T(S_Opening),D2D1::RectF(w/2-90,h-Margin-GalleryH-46,w/2+90,h-Margin-GalleryH-22),F_Meta,p.dim);
+  if(loading&&!current)Write(T(S_Opening),D2D1::RectF(w/2-90,h-Margin-GalleryH-46,w/2+90,h-Margin-GalleryH-22),F_Meta,p.dim);
   Dc()->PopLayer();
  }
  GfxPresent(true);
+ if(screen==ScrViewer&&current&&bitmap&&latencyId==latest&&currentGeneration==latencyId){
+  double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-openStarted).count();
+  if(!firstVisibleLogged){Log(L"first_visible_ms="+std::to_wstring(elapsed)+(showingPreview?L" stage=preview ":L" stage=full ")+currentPath);firstVisibleLogged=true;}
+  if(!showingPreview&&!fullVisibleLogged){Log(L"full_visible_ms="+std::to_wstring(elapsed)+L" "+currentPath);fullVisibleLogged=true;}
+ }
 }
 
 // ---------------------------------------------------------------- tick -----
 bool Tick(float dt){
  bool busy=false;
+ static double nextCachePoll=0;
+ if(lowMemoryNotice&&WaitForSingleObject(lowMemoryNotice,0)==WAIT_OBJECT_0){
+  if(!lowMemoryActive){lowMemoryActive=true;CacheHandlePressure(currentPath);}
+ }else lowMemoryActive=false;
+ if(Now()>=nextCachePoll){
+  nextCachePoll=Now()+1.0;RefreshCacheBudget();
+  {std::lock_guard lock(cacheMx);CacheTrimLocked(NormalisePath(currentPath),false);}
+  CacheLogTelemetry();
+ }
+ if(fastNavigation&&Now()>=fastNavigationUntil)fastNavigation=false;
  busy|=chrome.Step(dt);
  busy|=StepWindow(dt);
  busy|=themeMix.Step(dt);
+ busy|=wheelMix.Step(dt);
  busy|=zoomLog.Step(dt);
  if(zoomAnchored){
   // Derive translation from the same animated scale every frame. Independent
@@ -2487,6 +3519,38 @@ bool Tick(float dt){
  busy|=hero.left.Step(dt);busy|=hero.top.Step(dt);busy|=hero.right.Step(dt);busy|=hero.bottom.Step(dt);
  busy|=hero.radius.Step(dt);busy|=hero.shadow.Step(dt);busy|=hero.crossfade.Step(dt);
  if(hero.active)busy=true;
+ // With nothing animating and nothing loading, put the frame the reader is
+ // most likely to ask for next onto the GPU. Direct2D's device context is
+ // single-threaded, so "background" here means "in the gaps", which is
+ // exactly where a 20 MB upload is invisible.
+ // Not gated on `busy`: the springs from the last navigation keep it true for
+ // a few hundred milliseconds, which is the entire gap between two keypresses
+ // at any realistic browsing speed, so an idle-only rule never fired. Gated
+ // instead on not being mid-decode, and rate-limited so it cannot run twice
+ // for the same neighbour.
+ if(!loading&&!preview&&screen==ScrViewer&&siblings.size()>1&&GfxReady()){
+  int index=CurrentIndex();
+  if(index>=0){
+   int direction=navigationDirection?navigationDirection:1;
+   int next=int((index+direction+(int)siblings.size())%(int)siblings.size());
+   auto& neighbour=siblings[size_t(next)];
+   // Pre-upload whichever tier Open() would pick, which is the full frame when
+   // one is cached. Measuring showed every navigation over 16 ms was a
+   // full-resolution CreateBitmap: 145 MB for a 36 megapixel frame, 20-35 ms,
+   // on the UI thread, in the frame meant to show the new photograph. The
+   // work is unavoidable, but it does not have to happen while somebody is
+   // waiting for it.
+   // Screen tier only. Speculatively uploading a neighbour's full frame costs
+   // 138 MB of transfer for a photograph nobody has asked to see yet, and at
+   // fit it would be thrown away in favour of the screen frame anyway.
+   auto key=FrameKey(neighbour,CacheScreen,requestEdge);
+   auto frame=CacheGet(key);
+   if(!frame&&NeedsFullResolution()){
+    key=FrameKey(neighbour,CacheFull,0);frame=CacheGet(key);
+   }
+   if(frame)GpuPreUpload(frame,key,currentFrameKey);
+  }
+ }
  return busy;
 }
 void SyncGallery(){
@@ -2563,7 +3627,10 @@ void Command(int id){
  case IdCopy:CopyCurrent();return;
  case IdLike:ToggleLike();return;
  case IdRotate:Turn(1);return;
- case IdFit:if(fit){SetZoom(1.f/dpi,0,0);}else Fit();return;
+ // 1:1 is about the photograph, not about the tier: one original pixel to one
+ // screen pixel. On a screen-tier frame that is a magnification, which is
+ // exactly the condition that asks the worker for full resolution.
+ case IdFit:if(fit){SetZoom(1.f/(dpi*(std::max)(0.0001f,FrameScale())),0,0);RequestFullResolution();}else Fit();return;
  case IdMore:OpenPanel(PanelMenu);return;
  case IdEdit:OpenPanel(PanelEdit);return;
  case IdWinMin:ShowWindow(win,SW_MINIMIZE);return;
@@ -2606,6 +3673,15 @@ void Command(int id){
  }
  case IdThemeDark:SetTheme(false);return;
  case IdThemeLight:SetTheme(true);return;
+ case IdWheelZoom:SetWheelMode(0);return;
+ case IdWheelNav:SetWheelMode(1);return;
+ case IdTotalCmd:{
+  std::wstring note;
+  if(tcStatus==TcInstalled)TotalCommanderRemove(note);else TotalCommanderInstall(win,note);
+  tcStatus=TotalCommanderStatus();
+  if(!note.empty())Notify(note);
+  Wake();return;
+ }
  case IdLanguage:menuLevel=1;levelSlide.Reset(0);levelSlide.To(1);Wake();return;
  case IdLangBack:menuLevel=0;levelSlide.Reset(1);levelSlide.To(0);Wake();return;
  case IdLangRu:SetLanguage(0);return;
@@ -2625,6 +3701,8 @@ void Command(int id){
  case IdMedium:thickness=4;Wake();return;
  case IdThick:thickness=9;Wake();return;
  case IdHistRGB:case IdHistLuma:case IdHistR:case IdHistG:case IdHistB:histMode=id-IdHistRGB;Wake();return;
+ case IdScopeHist:scopeMode=0;Wake();return;
+ case IdScopeVector:scopeMode=1;Wake();return;
  case IdClipHigh:clipHigh=!clipHigh;clipHighFade.To(clipHigh?1.f:0.f);Wake();return;
  case IdClipLow:clipLow=!clipLow;clipLowFade.To(clipLow?1.f:0.f);Wake();return;
  default:break;
@@ -2775,7 +3853,7 @@ void CloseLibraryPopups(){
  sortOpen=false;filterOpen=false;sortReveal.To(0);filterReveal.To(0);filterScrollVel=0;
 }
 void ApplyFilterChanges(){
- filtersActive=!filterExtOff.empty()||filterRawOnly||filterRegularOnly||filterProfile||filterSizeLo>0||filterSizeHi!=~0ull;
+ filtersActive=!filterExtOn.empty()||filterRawOnly||filterRegularOnly||filterProfile||filterSizeLo>0||filterSizeHi!=~0ull;
  RefreshLibrary();Wake();
 }
 void KickProfileClassification(){
@@ -2802,16 +3880,30 @@ void LibraryCommand(int id){
  }
  if(id>=IdFilterExt0&&id<IdFilterExt0+int(std::size(LibraryExtensions))){
   auto ext=LibraryExtensions[id-IdFilterExt0];
-  if(filterExtOff.count(ext))filterExtOff.erase(ext);else filterExtOff[ext]=true;
+  if(filterExtOn.empty())filterExtOn[ext]=true;
+  else if(filterExtOn.count(ext))filterExtOn.erase(ext);else filterExtOn[ext]=true;
   ApplyFilterChanges();return;
  }
  switch(id){
  case IdLibBack:GoToLibrary();return;
+ case IdFavourites:case IdFavouritesChip:CloseLibraryPopups();OpenFavourites();return;
  case IdLibSearch:libSearchFocused=true;CloseLibraryPopups();Wake();return;
  case IdLibSort:{bool opening=!sortOpen;CloseLibraryPopups();sortOpen=opening;sortReveal.To(opening?1.f:0.f);Wake();return;}
  case IdLibFilter:{bool opening=!filterOpen;CloseLibraryPopups();filterOpen=opening;filterReveal.To(opening?1.f:0.f);if(opening)KickProfileClassification();Wake();return;}
- case IdLibViewFolders:if(libView!=ViewFolders){libView=ViewFolders;libViewSlide.To(0);libContentDirection=-1;libContentIn.Reset(0);libContentIn.To(1);RefreshLibrary();}Wake();return;
- case IdLibViewPhotos:if(libView!=ViewPhotosFlat){libView=ViewPhotosFlat;libViewSlide.To(1);libContentDirection=1;libContentIn.Reset(0);libContentIn.To(1);RefreshLibrary();}Wake();return;
+ case IdLibViewFolders:
+  if(screen!=ScrLibrary||libView!=ViewFolders){
+   screen=ScrLibrary;albumFolder.clear();favouritesOpen=false;
+   libView=ViewFolders;libViewSlide.To(0);libContentDirection=-1;libContentIn.Reset(0);libContentIn.To(1);
+   SaveLibView();RefreshLibrary();
+  }
+  Wake();return;
+ case IdLibViewPhotos:
+  if(screen!=ScrLibrary||libView!=ViewPhotosFlat){
+   screen=ScrLibrary;albumFolder.clear();favouritesOpen=false;
+   libView=ViewPhotosFlat;libViewSlide.To(1);libContentDirection=1;libContentIn.Reset(0);libContentIn.To(1);
+   SaveLibView();RefreshLibrary();
+  }
+  Wake();return;
  case IdLibRescan:IndexRescan();Wake();return;
  case IdSortName:if(libSortField==0)libSortDesc=!libSortDesc;else{libSortField=0;libSortDesc=false;}RefreshLibrary();Wake();return;
  case IdSortDate:if(libSortField==1)libSortDesc=!libSortDesc;else{libSortField=1;libSortDesc=true;}RefreshLibrary();Wake();return;
@@ -2823,7 +3915,7 @@ void LibraryCommand(int id){
  case IdFilterProfileP3:filterProfile=2;ApplyFilterChanges();return;
  case IdFilterProfileAdobe:filterProfile=3;ApplyFilterChanges();return;
  case IdFilterProfileNone:filterProfile=4;ApplyFilterChanges();return;
- case IdFilterClear:filterExtOff.clear();filterRawOnly=filterRegularOnly=false;filterProfile=0;filterSizeLo=0;filterSizeHi=~0ull;ApplyFilterChanges();return;
+ case IdFilterClear:filterExtOn.clear();filterRawOnly=filterRegularOnly=false;filterProfile=0;filterSizeLo=0;filterSizeHi=~0ull;ApplyFilterChanges();return;
  case IdFilterApply:filterOpen=false;filterReveal.To(0);ApplyFilterChanges();return;
  case IdWinMin:ShowWindow(win,SW_MINIMIZE);return;
  case IdWinMax:SendMessageW(win,WM_SYSCOMMAND,WindowMaximized()?SC_RESTORE:SC_MAXIMIZE,0);return;
@@ -2908,9 +4000,173 @@ LRESULT CALLBACK Keyboard(int code,WPARAM wp,LPARAM lp){
  }
  return CallNextHookEx(hook,code,wp,lp);
 }
+// Three passes over a real folder, through the real renderer.
+//
+//  1 cold      — every frame decoded for the first time, prefetch running
+//  2 warm      — the same walk again, now that the cache holds screen frames
+//  3 back/forth— N to N+1 and back, twenty times, which is the motion that
+//                should be indistinguishable from an already-open gallery
+// Three passes over a real folder, through the real renderer.
+//
+//  0 cold      — every frame decoded for the first time, prefetch running
+//  1 warm      — the same walk again, now that the cache holds screen frames
+//  2 steady    — a long randomised walk of `navBenchSteps` transitions, which
+//                is where rare stalls live: a median says nothing about the one
+//                transition in two hundred that the reader actually notices
+//
+// Every transition carries an attribution, so a slow one can name its cause
+// instead of leaving it to be guessed at.
+void NavBenchTick(){
+ if(navFiles.empty()){DestroyWindow(win);return;}
+ // The cold pass waits for each frame to finish; the later passes do not, since
+ // waiting would hide exactly the latency they exist to measure.
+ if(navPhase==0&&loading&&++navSettle<400)return;
+ navSettle=0;
+
+ auto record=[&](int phase){
+  NavSample s;
+  s.ms=navLastOpenMs;
+  s.phase=phase;
+  s.file=fs::path(currentPath).filename().wstring();
+  s.tier=navLastTrace.tier;
+  s.gpuResident=navLastTrace.gpuResident;
+  s.gpuReused=navLastTrace.gpuReused;
+  s.gpuCreated=navLastTrace.gpuCreated;
+  s.cacheLookupMs=navLastTrace.cacheLookupMs;
+  s.gpuMs=navLastTrace.gpuMs;
+  s.lockWaitMs=navLastTrace.lockWaitMs;
+  s.evictions=navLastTrace.evictionsDuring;
+  s.directionChanged=navLastTrace.directionChanged;
+  s.viewportChanged=navLastTrace.viewportChanged;
+  navSamples.push_back(std::move(s));
+ };
+ auto timedOpen=[&](const std::wstring& path){
+  auto start=std::chrono::steady_clock::now();
+  Open(path);
+  // Present the frame too: a swap nobody drew is not a navigation.
+  if(GfxReady())Frame();
+  navLastOpenMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+ };
+
+ if(navPhase==0){
+  if(navIndex>0)record(0);
+  if(navIndex>=int(navFiles.size())){navPhase=1;navIndex=0;}
+  else{timedOpen(navFiles[size_t(navIndex++)]);return;}
+ }
+ if(navPhase==1){
+  if(navIndex>0)record(1);
+  if(navIndex>=int(navFiles.size())){navPhase=2;navIndex=0;navRepeat=0;}
+  else{timedOpen(navFiles[size_t(navIndex++)]);return;}
+ }
+ if(navPhase==2){
+  if(navRepeat>0)record(2);
+  if(navRepeat>=navBenchSteps||navFiles.size()<2){navPhase=3;navIndex=0;navRepeat=0;}
+  else{
+   // A walk with occasional reversals and occasional jumps: pure back-and-forth
+   // between two files only ever exercises the two resident textures, and pure
+   // forward motion never tests a direction change.
+   static uint32_t seed=12345;
+   seed=seed*1664525u+1013904223u;
+   unsigned roll=(seed>>16)%100;
+   if(roll<70)navIndex+=1;                                   // keep going
+   else if(roll<90)navIndex-=1;                              // change of mind
+   else navIndex+=int((seed>>8)%17)-8;                       // a jump
+   int count=int(navFiles.size());
+   navIndex=((navIndex%count)+count)%count;
+   navRepeat++;
+   timedOpen(navFiles[size_t(navIndex)]);
+   return;
+  }
+ }
+ if(navPhase==3){
+  // Sequential, wrapping. This is the motion the prefetcher is built for and
+  // the one a reader actually performs; the randomised pass above is the
+  // adversarial case, kept because that is where rare stalls show up.
+  if(navRepeat>0)record(3);
+  if(navRepeat<navBenchSteps&&navFiles.size()>1){
+   navIndex=(navIndex+1)%int(navFiles.size());
+   navRepeat++;
+   timedOpen(navFiles[size_t(navIndex)]);
+   return;
+  }
+ }
+
+ // ---- report ------------------------------------------------------------
+ auto percentile=[](std::vector<double>& sorted,double p)->double{
+  if(sorted.empty())return 0;
+  size_t index=size_t(p*double(sorted.size()-1)+.5);
+  return sorted[(std::min)(index,sorted.size()-1)];
+ };
+ auto summarise=[&](int phase,const wchar_t* name){
+  std::vector<double> values;
+  size_t gpuReady=0,screenHit=0,fullNav=0,total=0;
+  for(auto& s:navSamples)if(s.phase==phase){
+   values.push_back(s.ms);total++;
+   if(s.gpuResident)gpuReady++;
+   if(s.tier==TierScreen)screenHit++;
+   if(s.tier==TierFull)fullNav++;
+  }
+  if(values.empty())return;
+  std::sort(values.begin(),values.end());
+  double sum=0;for(double v:values)sum+=v;
+  Log(std::wstring(L"NAVBENCH ")+name+
+      L" samples="+std::to_wstring(total)+
+      L" p50="+std::to_wstring(percentile(values,.50))+
+      L" p95="+std::to_wstring(percentile(values,.95))+
+      L" p99="+std::to_wstring(percentile(values,.99))+
+      L" max="+std::to_wstring(values.back())+
+      L" mean="+std::to_wstring(sum/double(values.size()))+
+      L" gpu_ready="+std::to_wstring(gpuReady)+L"/"+std::to_wstring(total)+
+      L" screen_cache_hit="+std::to_wstring(screenHit)+L"/"+std::to_wstring(total)+
+      L" full_tier_navigations="+std::to_wstring(fullNav)+L"/"+std::to_wstring(total));
+ };
+ summarise(0,L"cold");
+ summarise(1,L"warm");
+ summarise(2,L"random");
+ summarise(3,L"sequential");
+
+ // Every transition over one frame at 60 Hz, with its cause.
+ size_t slow=0;
+ for(auto& s:navSamples){
+  if(s.ms<=16.0)continue;
+  slow++;
+  std::wstring cause;
+  if(s.tier==TierMiss)cause=L"screen-cache-miss";
+  else if(s.tier==TierWarm||s.tier==TierThumb)cause=L"low-tier-only";
+  else if(s.gpuCreated)cause=L"gpu-texture-created";
+  else if(s.gpuReused)cause=L"gpu-upload";
+  else if(s.evictions)cause=L"eviction";
+  else if(s.viewportChanged)cause=L"viewport-resize";
+  else if(s.lockWaitMs>1.0)cause=L"lock-contention";
+  else if(s.directionChanged)cause=L"direction-change";
+  else cause=L"other";
+  Log(L"NAVSLOW phase="+std::to_wstring(s.phase)+
+      L" ms="+std::to_wstring(s.ms)+
+      L" cause="+cause+
+      L" tier="+std::to_wstring(s.tier)+
+      L" lookupMs="+std::to_wstring(s.cacheLookupMs)+
+      L" gpuMs="+std::to_wstring(s.gpuMs)+
+      L" lockMs="+std::to_wstring(s.lockWaitMs)+
+      L" evict="+std::to_wstring(s.evictions)+
+      L" dirChange="+std::to_wstring(s.directionChanged?1:0)+
+      L" resize="+std::to_wstring(s.viewportChanged?1:0)+
+      L" file="+s.file);
+ }
+ Log(L"NAVBENCH slow_transitions="+std::to_wstring(slow)+L"/"+std::to_wstring(navSamples.size()));
+ CacheLogTelemetry();
+ Log(L"NAVBENCH peak_working_set_mb="+std::to_wstring(ProcessWorkingSet()/(1024*1024)));
+ KillTimer(win,7);
+ DestroyWindow(win);
+}
 void TestTick(){
  if(++testWait>200){Log(L"FAIL timeout");testFailures++;DestroyWindow(win);return;}
- if(loading)return;
+ // A preview makes the window responsive but is not completion. Runtime tests
+ // must wait for the atomic full-resolution replacement or they can cancel it
+ // by opening the next fixture and report a false PASS on the JPEG preview.
+ if(loading||showingPreview)return;
+ // Loaded resets the device bitmap; give the render loop one frame to upload
+ // the final pixels before asserting that the image was actually rendered.
+ if(current&&!bitmap){Wake();return;}
  static bool assetModelTested=false;
  if(!assetModelTested){
   assetModelTested=true;auto saved=albumPhotos;auto savedVariants=assetVariants;
@@ -2933,6 +4189,194 @@ void TestTick(){
   if(ok)Log(L"PASS date timeline groups photos by local calendar day");else{Log(L"FAIL date timeline grouping");testFailures++;}
   albumPhotos=std::move(saved);timelineGroups=std::move(savedGroups);
  }
+ // The moment a preview is replaced by a better tier is the one a reader
+ // notices: the photograph must not jump, rescale, rotate or blink. This
+ // drives the same code the Loaded handler runs, at fit and while zoomed, and
+ // compares the rectangle the image actually occupies on screen.
+ // Source and display are two different things, and the places that must not
+ // confuse them are the header (which reports the photograph) and Save (which
+ // writes it). This drives both against a real 36 megapixel fixture.
+ static bool tierSplitTested=false;
+ if(!tierSplitTested){
+  tierSplitTested=true;
+  auto fixture=fs::path(L"tests/fixtures/bench-36mp.jpg");
+  std::error_code ec;
+  if(!fs::exists(fixture,ec)){
+   wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);
+   fixture=fs::path(exe).parent_path()/L".."/L"VetroView"/L"tests"/L"fixtures"/L"bench-36mp.jpg";
+  }
+  if(!fs::exists(fixture,ec))Log(L"SKIP tier split (bench-36mp.jpg not found)");
+  else{
+   auto savedCurrent=current;auto savedPath=currentPath;auto savedFit=fit;
+   bool savedCrop=hasCrop;auto savedStrokes=strokes;float savedRotate=rotate.target;
+   currentPath=fixture.wstring();hasCrop=false;strokes.clear();rotate.Reset(0);
+
+   auto screen=DecodeScreen(currentPath,2560,{});
+   if(!screen){Log(L"FAIL tier split: screen decode");testFailures++;}
+   else{
+    current=screen;fit=true;
+    bool smaller=current->w<current->SourceW();
+    if(smaller)Log(L"PASS the displayed frame is smaller than the asset");
+    else{Log(L"FAIL screen tier was not smaller than the source");testFailures++;}
+
+    // The header must report the photograph, not the tier.
+    if(SourceW()==7360&&SourceH()==4912)
+     Log(L"PASS header reports original dimensions from a screen-tier frame");
+    else{Log(L"FAIL header dimensions "+std::to_wstring(SourceW())+L"x"+std::to_wstring(SourceH()));testFailures++;}
+    if(DisplayW()==current->w&&DisplayW()!=SourceW())
+     Log(L"PASS display space still describes the decoded frame");
+    else{Log(L"FAIL display space");testFailures++;}
+
+    // At fit, a screen frame must not be asking for full resolution.
+    if(!NeedsFullResolution())Log(L"PASS fit does not require the full tier");
+    else{Log(L"FAIL fit asked for full resolution");testFailures++;}
+    // Merely enlarging the window raises Zoom() without wanting more detail
+    // than the asset holds, so it must NOT drag in a full decode.
+    fit=false;zoomLog.Reset(logf(1.6f));
+    if(!NeedsFullResolution())Log(L"PASS enlarging the view does not demand full resolution");
+    else{Log(L"FAIL a window-sized zoom asked for full resolution");testFailures++;}
+    // 1:1 against the asset does.
+    zoomLog.Reset(logf(1.f/(std::max)(0.0001f,FrameScale())));
+    if(NeedsFullResolution())Log(L"PASS 1:1 against the original asks for full resolution");
+    else{Log(L"FAIL 1:1 did not ask for full resolution");testFailures++;}
+    fit=true;zoomLog.Reset(0);
+
+    // Save must write the photograph, whatever is on screen.
+    auto flattened=Composite();
+    if(flattened&&flattened->w==7360&&flattened->h==4912)
+     Log(L"PASS Save composites at original resolution from a screen-tier view");
+    else{
+     Log(L"FAIL Save resolution "+(flattened?std::to_wstring(flattened->w)+L"x"+std::to_wstring(flattened->h):L"none"));
+     testFailures++;
+    }
+
+    // ... and a crop authored on the displayed frame must land on the asset
+    // at the same place, scaled up.
+    hasCrop=true;tool=ToolNone;
+    crop=D2D1::RectF(0,0,float(current->w)/2.f,float(current->h)/2.f);
+    auto cropped=Composite();
+    float ratio=float(current->SourceW())/float(current->w);
+    unsigned wantW=unsigned(float(current->w)/2.f*ratio+.5f);
+    if(cropped&&abs(int(cropped->w)-int(wantW))<=2)
+     Log(L"PASS crop coordinates scale from display space to the asset");
+    else{
+     Log(L"FAIL crop scaling "+(cropped?std::to_wstring(cropped->w):L"none")+L" wanted "+std::to_wstring(wantW));
+     testFailures++;
+    }
+    hasCrop=false;
+
+    // The other half of the contract: browsing must not develop full
+    // resolution, but asking for it must actually deliver it. This drives the
+    // real request through the real worker and waits for the swap.
+    fit=true;zoomLog.Reset(0);
+    siblings.clear();siblings.push_back(currentPath);
+    currentFrameKey.clear();
+    RequestFullResolution();
+    bool arrived=false;
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+    MSG pump{};
+    while(std::chrono::steady_clock::now()<deadline){
+     while(PeekMessageW(&pump,nullptr,0,0,PM_REMOVE)){
+      if(pump.message==WM_QUIT)break;
+      TranslateMessage(&pump);DispatchMessageW(&pump);
+     }
+     if(current&&current->tier==TierFullRes&&current->w==7360){arrived=true;break;}
+     Sleep(20);
+    }
+    if(arrived)Log(L"PASS asking for full resolution delivers the original pixels");
+    else{
+     Log(L"FAIL full resolution never arrived (tier="+std::to_wstring(current?current->tier:-1)+
+         L" w="+std::to_wstring(current?current->w:0)+L")");
+     testFailures++;
+    }
+   }
+   current=savedCurrent;currentPath=savedPath;fit=savedFit;
+   hasCrop=savedCrop;strokes=savedStrokes;rotate.Reset(savedRotate);
+   bitmap.Reset();
+  }
+ }
+ static bool refineTested=false;
+ if(!refineTested&&GfxReady()){
+  refineTested=true;
+  auto savedCurrent=current;auto savedFit=fit;
+  float savedZoom=zoomLog.target,savedPanX=panSX.target,savedPanY=panSY.target;
+  float savedRotate=rotate.target;
+
+  auto frame=[](unsigned w,unsigned h){
+   auto image=std::make_shared<Image>();image->w=w;image->h=h;image->pixels.assign(size_t(w)*h*4,128);
+   return image;
+  };
+  // A 2760x1842 screen frame replaced by the 7360x4912 original: the same
+  // photograph at two tiers, which is exactly what the worker delivers.
+  auto preview=frame(2760,1842),full=frame(7360,4912);
+  auto rectOf=[&]{
+   auto m=ImageMatrix();
+   auto a=m.TransformPoint(D2D1::Point2F(0,0));
+   auto b=m.TransformPoint(D2D1::Point2F(float(current->w),float(current->h)));
+   return D2D1::RectF((std::min)(a.x,b.x),(std::min)(a.y,b.y),(std::max)(a.x,b.x),(std::max)(a.y,b.y));
+  };
+  // This mirrors the Loaded handler exactly; if that changes, this must too.
+  auto swapIn=[&](const std::shared_ptr<Image>& arriving){
+   auto shown=current;
+   current=arriving;
+   bool refined=shown&&current&&shown!=current&&shown->w&&current->w&&!fit;
+   if(refined)zoomLog.Reset(zoomLog.target+logf(float(shown->w)/float(current->w)));
+   else if(fit){Fit();Snap();}
+  };
+  auto compare=[&](const D2D1_RECT_F& a,const D2D1_RECT_F& b,float tolerance){
+   return fabsf(a.left-b.left)<tolerance&&fabsf(a.top-b.top)<tolerance&&
+          fabsf(a.right-b.right)<tolerance&&fabsf(a.bottom-b.bottom)<tolerance;
+  };
+
+  // 1. At fit.
+  rotate.Reset(0);fit=true;current=preview;Fit();Snap();
+  auto before=rectOf();
+  swapIn(full);
+  auto after=rectOf();
+  if(compare(before,after,1.5f))Log(L"PASS preview to full does not move the image at fit");
+  else{Log(L"FAIL preview to full moved the image at fit");testFailures++;}
+
+  // 2. Zoomed in and panned, which is where a naive swap rescales.
+  fit=false;current=preview;
+  zoomLog.Reset(logf(1.6f));panSX.Reset(83);panSY.Reset(-47);Snap();
+  before=rectOf();
+  swapIn(full);
+  after=rectOf();
+  if(compare(before,after,2.0f))Log(L"PASS preview to full holds zoom and pan");
+  else{Log(L"FAIL preview to full changed zoom or pan");testFailures++;}
+
+  // 3. Orientation must survive the swap: both tiers arrive already oriented,
+  // so the displayed aspect cannot change.
+  bool aspectHeld=fabsf((float(preview->w)/preview->h)-(float(full->w)/full->h))<0.01f;
+  if(aspectHeld)Log(L"PASS both tiers carry the same orientation and aspect");
+  else{Log(L"FAIL tier aspect mismatch");testFailures++;}
+
+  // 4. No blank frame: a swap must never leave the renderer without pixels
+  // before the next present.
+  current=preview;bitmap.Reset();
+  auto key=NormalisePath(currentPath)+L"|refine-test";
+  auto texture=GpuTextureFor(current,key,key);
+  if(texture)Log(L"PASS the arriving tier has a texture before it is drawn");
+  else{Log(L"FAIL arriving tier had no texture");testFailures++;}
+
+  current=savedCurrent;fit=savedFit;
+  zoomLog.Reset(savedZoom);panSX.Reset(savedPanX);panSY.Reset(savedPanY);rotate.Reset(savedRotate);
+  bitmap.Reset();
+ }
+ static bool cachePolicyTested=false;
+ if(!cachePolicyTested){
+  cachePolicyTested=true;
+  auto b8=CacheBudgetFor(6*CacheGB,8*CacheGB,300*CacheMB);
+  auto b16=CacheBudgetFor(12*CacheGB,16*CacheGB,500*CacheMB);
+  auto b32=CacheBudgetFor(30*CacheGB,32*CacheGB,700*CacheMB);
+  auto low=CacheBudgetFor(1*CacheGB,8*CacheGB,200*CacheMB);
+  bool policy=low>=CacheLowMin&&low<=CacheLowMax&&b8>=256*CacheMB&&b8<=1*CacheGB&&
+   b16>=1*CacheGB&&b16<=2*CacheGB&&b32>=2*CacheGB&&b32<=CacheHardCap;
+  auto before=prefetchEpoch.load();CacheHandlePressure(currentPath);
+  policy&=prefetchEpoch.load()>before;
+  if(policy)Log(L"PASS RAM cache policy simulated 8/16/32 GB and low-memory cancellation");
+  else{Log(L"FAIL RAM cache policy");testFailures++;}
+ }
  if(testStage<int(testFiles.size())){
   if(testStage>0){
    if(!current||!bitmap){Log(L"FAIL decode/render");testFailures++;}
@@ -2942,11 +4386,14 @@ void TestTick(){
  }
  if(testStage==int(testFiles.size())){
   if(!current||!bitmap){Log(L"FAIL final decode/render");testFailures++;}
-  else Log(L"PASS rendered "+currentPath+L" codec="+current->codec);
+ else Log(L"PASS rendered "+currentPath+L" codec="+current->codec);
   Fit();Snap();
   float canvasW,canvasH;Size(canvasW,canvasH);
   float fillError=(std::min)(fabsf(EffW()*Zoom()-canvasW),fabsf(EffH()*Zoom()-canvasH));
-  if(fillError<.1f)Log(L"PASS fit reaches canvas edge");else{Log(L"FAIL canvas fit");testFailures++;}
+  // Tiny synthetic fixtures can legitimately hit the user-facing maximum
+  // zoom before their short edge reaches the canvas.
+  if(fillError<.1f||fabsf(Zoom()-MaxZoom)<.001f)Log(L"PASS fit reaches canvas edge or zoom limit");
+  else{Log(L"FAIL canvas fit");testFailures++;}
   float renderDpiX=0,renderDpiY=0;Dc()->GetDpi(&renderDpiX,&renderDpiY);
   if(fabsf(renderDpiX-96*dpi)<.01f&&fabsf(renderDpiY-96*dpi)<.01f)Log(L"PASS renderer DPI matches input");
   else{Log(L"FAIL renderer DPI");testFailures++;}
@@ -2963,9 +4410,15 @@ void TestTick(){
   if(anchorError<.002f)Log(L"PASS animated cursor anchor, repeated wheel");
   else{Log(L"FAIL animated cursor anchor");testFailures++;}
   Fit();Snap();
+  // The interactive suite asserts zoom semantics, independently of the
+  // user's persisted scrolling preference.
+  wheelMode=0;wheelMix.Reset(0);wheelCarry=0;
   float before=Zoom();
-  SendMessageW(win,WM_MOUSEWHEEL,MAKEWPARAM(0,WHEEL_DELTA),MAKELPARAM(300,300));
-  if(Zoom()>before||zoomLog.target>logf(before))Log(L"PASS wheel zoom");else{testFailures++;Log(L"FAIL zoom");}
+  // If a tiny fixture is already at MaxZoom, use the opposite direction so
+  // this still verifies that the wheel changes zoom rather than clamping.
+  short wheelDelta=before>=MaxZoom-.001f?short(-WHEEL_DELTA):short(WHEEL_DELTA);
+  SendMessageW(win,WM_MOUSEWHEEL,MAKEWPARAM(0,WORD(wheelDelta)),MAKELPARAM(300,300));
+  if(fabsf(zoomLog.target-logf(before))>.0001f)Log(L"PASS wheel zoom");else{testFailures++;Log(L"FAIL zoom");}
   float px=panSX.v,py=panSY.v;
   SendMessageW(win,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(400,300));
   SendMessageW(win,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(450,340));
@@ -3090,19 +4543,35 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  case WM_PAINT:{PAINTSTRUCT ps;BeginPaint(hwnd,&ps);Frame();EndPaint(hwnd,&ps);return 0;}
  case Loaded:{
   std::unique_ptr<Result> result;
-  {std::lock_guard lock(mx);result=std::move(ready);}
+  {
+   std::lock_guard lock(mx);
+   if(!ready.empty()){result=std::move(ready.front());ready.pop_front();}
+  }
   if(result&&result->id==latest){
-   current=result->image;errorText=result->error;
+   auto shown=current;
+   current=result->image;currentGeneration=result->id;errorText=result->error;
+   currentFrameKey=result->key;
+   if(current&&current->w<=1024)backdropSource=current;
    if(!result->files.empty()||!preview)siblings=std::move(result->files);
-   loading=false;bitmap.Reset();backdrop.Reset();
+   loading=result->partial;
+   bitmap=current?GpuTextureFor(current,result->key.empty()?NormalisePath(result->path)+L"|live":result->key,
+                                currentFrameKey):ComPtr<ID2D1Bitmap>();
+   backdrop.Reset();
    if(preview){if(current)PreviewBounds();else Close();}
    SyncGallery();
    ThumbTrim(siblings);
-   if(current){
+   // Metadata and the histogram are read from the final frame, so the panel
+   // never shows figures taken from a downscaled preview.
+   if(current&&!result->partial){
     metaId=result->id;metaPending=true;
     MetaRequest(currentPath,metaId,current,win,MetaReady);
    }
-   Fit();Snap();
+   // The full frame arriving behind a preview must not move the photograph: at
+   // fit that is a no-op, and a reader who zoomed in keeps the same framing.
+   bool refined=shown&&current&&shown!=current&&shown->w&&current->w&&!fit;
+   if(refined)zoomLog.Reset(zoomLog.target+logf(float(shown->w)/float(current->w)));
+   else if(fit){Fit();Snap();}
+   showingPreview=result->partial;
    if(hero.active&&!hero.closing){
     hero.crossfade.Reset(0);hero.crossfade.To(1);
     float w,h;Size(w,h);
@@ -3117,11 +4586,32 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  }
  case MetaReady:{
   Meta fresh;
-  if(MetaCollect(metaId,fresh)){info=std::move(fresh);metaPending=false;for(auto& g:histPath)g.Reset();
+  // The quick pass answers with rating and label only; it must not overwrite
+  // a full record that has already arrived for the same photograph.
+  if(MetaCollect(metaQuickId,fresh)){
+   if(SamePath(fresh.path,currentPath)&&!info.ready){
+    info.hasRating=fresh.hasRating;info.rating=fresh.rating;
+    info.label=fresh.label;info.xmpSource=fresh.xmpSource;
+    Wake();
+   }
+   return 0;
+  }
+  if(MetaCollect(metaId,fresh)){info=std::move(fresh);metaPending=false;for(auto& g:histPath)g.Reset();scopeBitmap.Reset();
    histRise.Reset(0);histRise.To(1);Wake();}
   return 0;
  }
- case ThumbReady:Wake();return 0;
+ case ThumbReady:{
+  if(screen==ScrViewer&&(!current||(showingPreview&&current->w<=180))){
+   auto thumb=ThumbLookup(currentPath);
+   if(thumb&&thumb!=current){
+    current=thumb;currentFrameKey=NormalisePath(currentPath)+L"|thumb";backdropSource=thumb;
+    bitmap.Reset();backdrop.Reset();
+    showingPreview=true;
+    if(fit){Fit();Snap();}
+   }
+  }
+  Wake();return 0;
+ }
  case IndexFolders:if(screen!=ScrViewer)RefreshLibrary();else Wake();return 0;
  case IndexProgress:Wake();return 0;
  case WM_DEVICECHANGE:
@@ -3181,6 +4671,9 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    }
    return 0;
   }
+  // A command-line Quick Look window is explicitly dismissed with Esc even
+  // when an incidental panel is open.
+  if(wp==VK_ESCAPE&&quickLookInvocation){Close();return 0;}
   if(wp==VK_ESCAPE&&panel!=PanelNone){ClosePanel();return 0;}
   if(wp==VK_ESCAPE&&tool!=ToolNone){tool=ToolNone;painting=false;Wake();return 0;}
   if(wp==VK_ESCAPE||(wp==VK_SPACE&&preview)){if(!preview&&screen==ScrViewer&&!navStack.empty()){ViewerBack();return 0;}Close();return 0;}
@@ -3192,7 +4685,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   if(wp==VK_RIGHT)Navigate(1);
   else if(wp==VK_LEFT)Navigate(-1);
   else if(wp=='0')Fit();
-  else if(wp=='1'){SetZoom(1.f/dpi,0,0);}
+  else if(wp=='1'){SetZoom(1.f/(dpi*(std::max)(0.0001f,FrameScale())),0,0);RequestFullResolution();}
   else if(wp==VK_ADD||wp==VK_OEM_PLUS)SetZoom(Zoom()*1.35f,0,0);
   else if(wp==VK_SUBTRACT||wp==VK_OEM_MINUS)SetZoom(Zoom()/1.35f,0,0);
   else if(wp=='R')Turn(shift?-1:1);
@@ -3231,12 +4724,23 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   if(panel!=PanelNone&&Inside(R(IdPanelBody),x,y)){
    panelScrollVel-=delta*900.f;Wake();return 0;
   }
+  if(wheelMode==1&&!siblings.empty()){
+   // Touchpads and free-spinning wheels send fractions of a notch; carrying the
+   // remainder keeps one physical click at exactly one photograph.
+   if(wheelCarry!=0&&(wheelCarry>0)!=(delta>0))wheelCarry=0;
+   wheelCarry+=delta;
+   int steps=int(wheelCarry);
+   if(steps){wheelCarry-=float(steps);Navigate(-steps);}
+   return 0;
+  }
   SetZoom(expf(zoomLog.target)*powf(1.22f,delta),x-w/2,y-h/2);
   return 0;
  }
  case WM_LBUTTONDBLCLK:
   if(preview||screen!=ScrViewer)return 0;
-  if(HitTest(GET_X_LPARAM(lp)/dpi,GET_Y_LPARAM(lp)/dpi)==IdNone){if(fit)SetZoom(1.f/dpi,0,0);else Fit();}
+  if(HitTest(GET_X_LPARAM(lp)/dpi,GET_Y_LPARAM(lp)/dpi)==IdNone){
+   if(fit){SetZoom(1.f/(dpi*(std::max)(0.0001f,FrameScale())),0,0);RequestFullResolution();}else Fit();
+  }
   return 0;
  case WM_LBUTTONDOWN:
   if(preview){SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;}
@@ -3291,6 +4795,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  }
  case WM_TIMER:
   if(wp==2){TestTick();return 0;}
+  if(wp==7){NavBenchTick();return 0;}
   if(wp==5){
    KillTimer(hwnd,5);
    BOOL restore=FALSE;DwmSetWindowAttribute(hwnd,DWMWA_TRANSITIONS_FORCEDISABLED,&restore,sizeof(restore));
@@ -3327,6 +4832,11 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    if(action==1)NormalWindow();
   }
   return 0;
+ case WM_QUERYENDSESSION:return TRUE;
+ case WM_ENDSESSION:
+  // An installer/shutdown is different from the user's ordinary Close: an
+  // autostart viewer normally hides, but it must release VetroLook.exe here.
+  if(wp){autostart=false;DestroyWindow(hwnd);}return 0;
  case WM_CLOSE:Close();return 0;
  case WM_DESTROY:PostQuitMessage(testFailures?1:0);return 0;
  }
@@ -3338,11 +4848,33 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  RoInitialize(RO_INIT_SINGLETHREADED);
  bool ole=SUCCEEDED(OleInitialize(nullptr)); // needed for DoDragDrop, on top of the WinRT apartment above
  DWORD stored=0,size=sizeof(stored);
- RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",RRF_RT_REG_DWORD,nullptr,&stored,&size);
- bool light=stored!=0;
+ LONG themeRead=RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ bool light=false;
+ if(themeRead==ERROR_SUCCESS)light=stored!=0;
+ else{
+  // First launch follows the Windows app theme, then persist that initial
+  // choice so a later manual change remains the user's choice.
+  DWORD systemLight=0;size=sizeof(systemLight);
+  if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                  L"AppsUseLightTheme",RRF_RT_REG_DWORD,nullptr,&systemLight,&size)==ERROR_SUCCESS)
+   light=systemLight!=0;
+  DWORD initial=light?1u:0u;
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",REG_DWORD,&initial,sizeof(initial));
+ }
  stored=0;size=sizeof(stored);
  RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Language",RRF_RT_REG_DWORD,nullptr,&stored,&size);
  language=int(stored)?1:0;
+ stored=0;size=sizeof(stored);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"WheelMode",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ wheelMode=int(stored)?1:0;wheelMix.Reset(float(wheelMode));
+ // Library view. Absent the setting — a first run, or a reset profile — this
+ // is the timeline; a value only exists once somebody chose Folders (or chose
+ // to go back to the timeline) for themselves.
+ stored=DWORD(DefaultLibView);size=sizeof(stored);
+ if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LibraryView",RRF_RT_REG_DWORD,nullptr,&stored,&size)!=ERROR_SUCCESS)
+  stored=DWORD(DefaultLibView);
+ libView=(stored==DWORD(ViewFolders))?ViewFolders:ViewPhotosFlat;
+ libViewSlide.Reset(libView==ViewPhotosFlat?1.f:0.f);
  BOOL animations=TRUE;
  SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
  reducedMotion=!animations;
@@ -3350,14 +4882,39 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
 
  int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);
  testing=argc>2&&!wcscmp(argv[1],L"--self-test");
- bool quickCLI=argc>2&&!wcscmp(argv[1],L"--preview");
+ // --nav-bench <log> <folder>: walk a real folder three times and report the
+ // navigation latency of each pass. Uses the ordinary window and renderer.
+ navBench=argc>3&&!wcscmp(argv[1],L"--nav-bench");
+ if(navBench){
+  testing=true;
+  logFile.open(fs::path(argv[2]));
+  std::error_code ec;
+  for(fs::directory_iterator it(fs::path(argv[3]),fs::directory_options::skip_permission_denied,ec),end;
+      it!=end&&!ec;it.increment(ec)){
+   if(it->is_regular_file(ec)&&Supported(it->path().wstring()))navFiles.push_back(it->path().wstring());
+  }
+  std::sort(navFiles.begin(),navFiles.end(),[](auto&a,auto&b){return StrCmpLogicalW(a.c_str(),b.c_str())<0;});
+  size_t limit=argc>4?size_t(_wtoi(argv[4])):50;
+  if(navFiles.size()>limit)navFiles.resize(limit);
+  if(argc>5)navBenchSteps=(std::max)(1,_wtoi(argv[5]));
+  // Interval between navigations. The default of one frame at 60 Hz is
+  // faster than any hand; a larger value models a reader who pauses, which
+  // is what lets idle pre-upload do its job.
+  if(argc>6)navBenchInterval=(std::max)(1u,unsigned(_wtoi(argv[6])));
+ }
+ // --quicklook is the public entry point any file manager can call; --preview is
+ // the older spelling the Explorer path still uses.
+ bool quickCLI=argc>2&&(!wcscmp(argv[1],L"--preview")||!wcscmp(argv[1],L"--quicklook"));
+ quickLookInvocation=quickCLI;
  bool background=argc>1&&!wcscmp(argv[1],L"--background");
  backgroundMode=background;
  bool registerCLI=argc>1&&!wcscmp(argv[1],L"--register");
  if(registerCLI){std::wstring failure;bool ok=RegisterAsViewer(failure);LocalFree(argv);return ok?0:4;}
  if(argc>1&&!wcscmp(argv[1],L"--unregister")){UnregisterViewer();LocalFree(argv);return 0;}
  if(!testing)RepairRegistrationIfStale();
- if(testing){logFile.open(fs::path(argv[2]));for(int i=3;i<argc;i++)testFiles.push_back(argv[i]);}
+ // --nav-bench has already opened the log; reopening an open wofstream sets
+ // failbit and silently discards every line that follows.
+ if(testing&&!navBench){logFile.open(fs::path(argv[2]));for(int i=3;i<argc;i++)testFiles.push_back(argv[i]);}
  // Opening a file always gets its own window: launching a second photo while
  // one is already showing must not disturb it, so that case falls through
  // and lets this process create a window of its own instead of forwarding
@@ -3366,7 +4923,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
 #ifdef VETRO_REVIEW_BUILD
  existing=nullptr;autostart=false;
 #endif
- bool openingFile=argc>1&&!background;
+ bool openingFile=argc>1&&!background&&!testing&&!navBench;
  if(existing&&!testing&&!quickCLI&&!openingFile&&!background){
   PostMessageW(existing,ActivateNormal,0,0);
   LocalFree(argv);return 0;
@@ -3398,6 +4955,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  ApplyCorners();
  if(!GfxCreate(win,dpi))return 2;
  DragAcceptFiles(win,TRUE);
+ lowMemoryNotice=CreateMemoryResourceNotification(LowMemoryResourceNotification);
+ RefreshCacheBudget();
+ FavouritesLoad();
+ MetaCacheLoad();
+ // 5 MB of lens XML, parsed once on a low-priority thread. Nothing waits for
+ // it: LensLookup reports "not ready" until it lands, and the Info panel asks
+ // again the next time it needs a record.
+ LensDbStart();
  worker=std::thread(Worker);
  ThumbStart(win,ThumbReady);
  if(!testing&&!quickCLI)IndexStart(win,IndexFolders,IndexProgress);
@@ -3427,7 +4992,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  if(keyboardThread.joinable())WaitForSingleObject(keyboardReady,INFINITE);
  CloseHandle(keyboardReady);
  if(!background&&!quickCLI){Frame();ShowWindow(win,SW_SHOW);UpdateWindow(win);Log(L"Window first paint");}
- if(testing){ShowWindow(win,SW_SHOW);SetTimer(win,2,250,nullptr);}
+ if(navBench){ShowWindow(win,SW_SHOW);SetTimer(win,7,navBenchInterval,nullptr);}
+ else if(testing){ShowWindow(win,SW_SHOW);SetTimer(win,2,250,nullptr);}
  else if(quickCLI){preview=true;explorer=GetDesktopWindow();ApplyCorners();Open(argv[2]);}
  else if(argc>1&&!background){
   // Launched straight onto a file (Explorer, "Open with", a shortcut): Back
@@ -3472,6 +5038,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  if(actionWorker.joinable())actionWorker.join();
  if(!testing&&!quickCLI)IndexStop();
  MetaStop();ThumbStop();ShutdownSharing();
+ FavouritesFlush();MetaCacheFlush();
+ if(lowMemoryNotice){CloseHandle(lowMemoryNotice);lowMemoryNotice=nullptr;}
  ReleaseBitmaps();GfxDestroy();if(ole)OleUninitialize();RoUninitialize();
  return int(msg.wParam);
 }

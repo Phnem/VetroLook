@@ -8,8 +8,6 @@ void PrintImage(HWND owner, const Image& image, int degrees);
 void ShareImage(HWND owner, const std::wstring& path);
 void ShutdownSharing();
 bool CopyToClipboard(HWND owner, const Image& image, const std::wstring& path);
-bool FavouriteGet(const std::wstring& path);
-void FavouriteSet(const std::wstring& path, bool on);
 bool ViewerRegistered();
 bool RegisterAsViewer(std::wstring& error);
 // Rewrites an existing registration that still points at a path this

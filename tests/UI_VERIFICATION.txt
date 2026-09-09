@@ -1,0 +1,15 @@
+Native UI verification, 2026-09-06
+- Launched dist/VetroView.exe and inspected its window through computer-use screenshots.
+- PNG and JPEG visibly rendered; Left changed PNG to JPEG; 1 switched to 100%.
+- 1920x1200 Windows wallpaper JPEG visibly rendered.
+- Explorer file-list PNG selection + Space changed preview to selected PNG.
+- Space hid the preview; independently verified no visible viewer in window listing.
+- Rebuilt with preview topmost window positioning; launched final executable.
+- Visually inspected final WebP, AVIF, EXR and right rotation.
+- Escape hid the final preview; background process remained responding.
+- Automated final test verified pan axes, wheel zoom, resized client dimensions,
+  sibling navigation, successful decoder result and D2D bitmap creation.
+- Final optional repeat of Explorer selection-follow testing was inconclusive:
+  computer-use reported "coordinate input geometry is unavailable" for Explorer.
+  Selection-follow is implemented but is not claimed runtime verified.
+- No VetroView application crash entries were returned by the Application log query.

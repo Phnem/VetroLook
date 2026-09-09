@@ -1,7 +1,6 @@
 build/
+build-release-verify/
 build-dav1d/
 tools/
-dist/
-release/*.exe
 *.log
 tests/images/

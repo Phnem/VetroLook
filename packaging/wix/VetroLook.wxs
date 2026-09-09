@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="VetroLook" Manufacturer="VetroLook" Version="$(ProductVersion)"
+           UpgradeCode="1B2C3D4E-5F6A-4B7C-8D9E-0F1A2B3C4D5E" Scope="perMachine" Compressed="yes">
+    <!-- Development/release builds currently share a three-part display
+         version.  Treat a rebuilt MSI with that same version as an upgrade,
+         rather than leaving an old, locked executable in place. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- Close a running viewer before InstallFiles replaces its executable.
+         No forced termination: a refusal/cancellation leaves the existing
+         installation intact instead of scheduling a system reboot. -->
+    <util:CloseApplication Id="CloseRunningVetroLook" Target="VetroLook.exe"
+                           CloseMessage="yes" ElevatedCloseMessage="yes"
+                           EndSessionMessage="yes" ElevatedEndSessionMessage="yes"
+                           Timeout="10" TerminateProcess="0" RebootPrompt="no" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch VetroLook after setup" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="A Start menu and Desktop shortcut will be created. You can pin VetroLook to the taskbar from its Start menu entry." />
+    <CustomAction Id="LaunchVetroLook" FileRef="VetroLookEXE" ExeCommand=""
+                  Execute="immediate" Return="asyncNoWait" Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVetroLook"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VetroLook" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="VetroLook" />
+    </StandardDirectory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="2A9F1E3B-6C4D-4A8E-9B2F-7D3C5E1A8F60">
+        <File Id="VetroLookEXE" Source="$(ExePath)" KeyPath="yes" />
+        <File Id="ReleaseReadme" Source="$(ReadmePath)" />
+        <File Id="ThirdPartyNotices" Source="$(NoticesPath)" />
+      </Component>
+      <Directory Id="LensfunDbFolder" Name="lensfun-db">
+      </Directory>
+
+      <!--
+        File-association registration: purely declarative, HKLM (native 64-bit view, this
+        package is built -arch x64 so these components are 64-bit by default, no
+        Wow6432Node redirection. No custom action of any kind. This is machine-wide
+        candidate/handler registration only: it publishes the app under
+        RegisteredApplications and OpenWithProgids so it shows up as an Open With option
+        for these extensions; it never touches a .ext's UserChoice default, so it cannot
+        and does not force VetroLook as anyone's default viewer. Windows Installer removes
+        every value below on uninstall the same way it removes any other component's
+        registry data, nothing left to clean up by hand.
+
+        (Two earlier approaches were tried and dropped: writing this same data to HKCU via
+        an impersonated deferred custom action, and generating it via a bundled reg-import
+        script. Both depended on Windows Installer correctly targeting the interactive
+        installing user's registry hive from an elevated process, which this package no
+        longer requires or relies on at all now that everything lives in HKLM, written
+        directly by the elevated install itself.)
+      -->
+      <Component Id="FileAssociationRegistry" Guid="8C1D3E5F-2A4B-4C6D-9E0F-1A2B3C4D5E6F">
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe" Name="FriendlyAppName" Value="Vetro Look" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\shell\open\command" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\DefaultIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
+
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image" Value="Vetro Look Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image" Name="FriendlyTypeName" Value="Vetro Look Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\shell\open\command" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\DefaultIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\Application" Name="ApplicationName" Value="Vetro Look" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\Application" Name="ApplicationDescription" Value="Native image viewer" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\Application" Name="ApplicationIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
+
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationName" Value="Vetro Look" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationDescription" Value="Native image viewer for JPEG, PNG, WebP, AVIF and RAW" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="Vetro Look" Value="Software\VetroLook\Capabilities" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\VetroLook.exe" Value="[INSTALLFOLDER]VetroLook.exe" Type="string" />
+
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".jpg" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".jfif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".png" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".gif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".webp" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".avif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".exr" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".bmp" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".tif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".tiff" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".ico" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".heic" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".heif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".psd" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".psb" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".cr2" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".cr3" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".nef" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".arw" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".dng" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".raf" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".rw2" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".orf" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name=".pef" Value="" Type="string" />
+
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".jpg" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".jpeg" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".jfif" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".png" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".gif" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".webp" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".avif" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".exr" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".bmp" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".tif" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".tiff" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".ico" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".heic" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".heif" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".psd" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".psb" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".cr3" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".nef" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".arw" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".dng" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".raf" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".rw2" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".orf" Value="VetroLook.Image" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name=".pef" Value="VetroLook.Image" Type="string" />
+
+        <RegistryValue Root="HKLM" Key="Software\Classes\.jpg\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.jpeg\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.jfif\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.png\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.gif\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.webp\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.avif\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.exr\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.bmp\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.tif\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.tiff\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.ico\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.heic\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.heif\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.cr2\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.cr3\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.nef\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.arw\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.dng\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.raf\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.rw2\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.orf\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.pef\OpenWithProgids" Name="VetroLook.Image" Value="" Type="string" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="6D4B8A2E-1F3C-4E7D-A5B9-8C2F0E6D4A31">
+        <Shortcut Id="ApplicationStartMenuShortcut" Name="VetroLook"
+                  Target="[INSTALLFOLDER]VetroLook.exe" WorkingDirectory="INSTALLFOLDER" />
+        <Shortcut Id="ApplicationDesktopShortcut" Directory="DesktopFolder" Name="VetroLook"
+                  Target="[INSTALLFOLDER]VetroLook.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\VetroLook" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="VetroLook" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="LensfunDatabase" />
+      <ComponentRef Id="FileAssociationRegistry" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+  </Package>
+  <?include VetroLook.lensfun.wxi?>
+</Wix>

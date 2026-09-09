@@ -1,0 +1,18 @@
+﻿Public RAW fixtures, downloaded from https://raw.pixls.us/ .
+
+The raw.pixls.us sample set is contributed by photographers explicitly for
+software testing and is published under CC0 (public domain dedication).
+See https://raw.pixls.us/ for the collection's terms.
+
+These files exist so the RAW benchmarks in REPORT.md can be reproduced on
+another machine. No personal photographs are used for published benchmarks.
+
+  Nikon-D850-12bit-uncompressed-72M.NEF   Nikon D850, 12-bit uncompressed
+  Nikon-D850-14bit-lossless-53M.NEF       Nikon D850, 14-bit lossless compressed
+  D850.NEF                                Nikon D850, 14-bit uncompressed (3:2 crop)
+  Leica-M10-33M.dng                       Leica M10
+  Pentax-645Z-69M.DNG                     Pentax 645Z
+  P1.DNG                                  Phase One IQ180
+
+They are NOT committed to the repository; tests/get-raw-fixtures.ps1 fetches
+them on demand.

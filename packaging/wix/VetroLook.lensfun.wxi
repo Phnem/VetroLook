@@ -1,0 +1,65 @@
+<Include>
+<Fragment xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <DirectoryRef Id="LensfunDbFolder">
+    <Component Id="LensfunDatabase" Guid="BD0C4A9F-CA21-45CB-9EF3-4D7784E55A20">
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\6x6.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\actioncams.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-canon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-casio.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-fujifilm.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-kodak.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-konica-minolta.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-leica.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-nikon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-olympus.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-panasonic.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-pentax.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-ricoh.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-samsung.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-sigma.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\compact-sony.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\contax.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\COPYING.CC_BY-SA_3.0" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\generic.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-canon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-fujifilm.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-hasselblad.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-leica.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-nikon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-olympus.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-panasonic.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-pentax.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-samsung.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-samyang.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-sigma.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-sony.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-tamron.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-tokina.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\mil-zeiss.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\misc.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\om-system.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\rf-leica.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-canon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-hasselblad.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-konica-minolta.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-leica.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-nikon.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-olympus.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-panasonic.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-pentax.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-ricoh.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-samsung.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-samyang.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-schneider.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-sigma.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-soligor.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-sony.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-tamron.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-tokina.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-ussr.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-vivitar.xml" />
+        <File Source="D:\AndroidStudioProjects\Vetro_Look\dist\lensfun-db\slr-zeiss.xml" />
+    </Component>
+  </DirectoryRef>
+</Fragment>
+</Include>

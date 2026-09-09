@@ -183,8 +183,66 @@ static const Phrase phrases[]={
  {L"Обновление библиотеки…",L"Updating library…"},
  {L"Папок с фото не найдено",L"No photo folders found"},
  {L"В этой папке нет фото",L"No photos in this folder"},
+ {L"Фотографий не найдено",L"No photos found"},
  {L"Ваша фотоколлекция",L"Your photo collection"},
  {L"Пересканировать",L"Rescan"},
+
+ {L"Колесо мыши",L"Mouse wheel"},
+ {L"Масштаб",L"Zoom"},
+ {L"Листание",L"Navigate"},
+
+ {L"Вектороскоп",L"Vectorscope"},
+ {L"Установить",L"Install"},
+ {L"Удалить",L"Remove"},
+ {L"Total Commander не найден",L"Total Commander was not found"},
+ {L"Закройте Total Commander, затем нажмите «Повтор». Пока Total Commander запущен, его INI-файлы не будут изменены.",
+  L"Close Total Commander, then choose Retry. Its INI files will not be changed while Total Commander is running."},
+ {L"Пробел в Total Commander уже назначен на другую команду. Заменить?",
+  L"Space in Total Commander is already bound to another command. Replace it?"},
+ {L"Отменено",L"Cancelled"},
+ {L"Не удалось изменить файлы Total Commander",L"Could not update the Total Commander files"},
+ {L"Интеграция установлена — перезапустите Total Commander",L"Integration installed - restart Total Commander"},
+ {L"Интеграция удалена — перезапустите Total Commander",L"Integration removed - restart Total Commander"},
+
+ {L"Хронология",L"Timeline"},
+ {L"Папки",L"Folders"},
+ {L"Избранное",L"Favourites"},
+ {L"Здесь пока пусто",L"Nothing here yet"},
+ {L"Нажмите ♥ на фотографии,",L"Press the heart on a"},
+ {L"чтобы добавить её сюда",L"photograph to add it here"},
+
+ {L"ЦВЕТ",L"COLOR"},
+ {L"АВТОР",L"AUTHOR"},
+ {L"ADOBE / XMP",L"ADOBE / XMP"},
+ {L"ОБЪЕКТИВ",L"LENS"},
+
+ {L"Рейтинг XMP",L"XMP rating"},
+ {L"Метка",L"Label"},
+ {L"Отклонено",L"Rejected"},
+ {L"Источник",L"Source"},
+ {L"XMP-файл рядом",L"XMP sidecar"},
+ {L"Внутри файла",L"Embedded"},
+
+ {L"Автор",L"Author"},
+ {L"Авторские права",L"Copyright"},
+ {L"Ключевые слова",L"Keywords"},
+ {L"Название",L"Title"},
+ {L"Описание",L"Description"},
+ {L"Программа",L"Software"},
+
+ {L"Профиль объектива",L"Lens profile"},
+ {L"Найден",L"Available"},
+ {L"Профиль коррекции не найден",L"Lens correction profile not found"},
+ {L"Дисторсия",L"Distortion"},
+ {L"Виньетирование",L"Vignette"},
+ // Shortened deliberately: the Info panel's label column clips the full
+ // spelling, and a clipped word reads as a bug.
+ {L"Хроматизм",L"Chromatic ab."},
+
+ {L"Коррекция объектива",L"Lens correction"},
+ {L"Авто",L"Auto"},
+ {L"Камера",L"Camera"},
+ {L"Объектив",L"Lens"},
 };
 static_assert(sizeof(phrases)/sizeof(phrases[0])==S_COUNT,"localisation table is out of step with Str");
 const wchar_t* T(Str s){
@@ -224,6 +282,7 @@ const wchar_t* IcChevron  =L"M9.6 5.4 L16.2 12 L9.6 18.6";
 const wchar_t* IcChevronL =L"M14.4 5.4 L7.8 12 L14.4 18.6";
 const wchar_t* IcDefault  =L"M3.6 4.8 L20.4 4.8 L20.4 19.2 L3.6 19.2 Z M3.6 8.6 L20.4 8.6 M8.4 14 L11.1 16.7 L16 11.4";
 const wchar_t* IcSpace    =L"M3.2 8.4 L20.8 8.4 L20.8 15.6 L3.2 15.6 Z M7.2 11.2 L7.2 12.8 M16.8 11.2 L16.8 12.8";
+const wchar_t* IcMouse    =L"M12 3.4 C15 3.4 17.2 5.7 17.2 8.6 L17.2 15.4 C17.2 18.3 15 20.6 12 20.6 C9 20.6 6.8 18.3 6.8 15.4 L6.8 8.6 C6.8 5.7 9 3.4 12 3.4 Z M12 7 L12 10.6";
 const wchar_t* IcSearch   =L"M10.8 4.4 C14.89 4.4 18.2 7.71 18.2 11.8 C18.2 15.89 14.89 19.2 10.8 19.2 C6.71 19.2 3.4 15.89 3.4 11.8 C3.4 7.71 6.71 4.4 10.8 4.4 Z M16.2 17.2 L21 22";
 const wchar_t* IcSortLines=L"M4.2 6.8 L19.8 6.8 M4.2 12 L14.4 12 M4.2 17.2 L9.6 17.2";
 const wchar_t* IcFilter   =L"M3.6 5 L20.4 5 L14 13.2 L14 19.4 L10 19.4 L10 13.2 Z";

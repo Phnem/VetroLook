@@ -17,6 +17,8 @@
 
 <br>
 
+<img src="docs/assets/hero.png" width="900" alt="VetroLook">
+
 </div>
 
 ---
@@ -37,6 +39,18 @@ VetroLook aims to combine:
 - a modern photo library that works directly with your existing folders
 
 without requiring you to import your collection into a proprietary database or upload anything to the cloud.
+
+## v1.1 highlights
+
+Version 1.1 focuses on the path between selecting a file and seeing a stable
+image. JPEG, PNG, TIFF and static WebP now choose a screen-sized decode or
+scale path where their decoders support it; PSD/PSB screen viewing streams
+rows instead of materialising a full-size BGRA image. RAW embedded previews
+are ranked by useful dimensions before decode. The app keeps the trusted AVIF
+decode path where the platform decoder does not match it closely enough.
+
+The shipped MSI, Inno Setup installer, MSIX, and portable ZIP now all carry
+the Lensfun profile database and the runtime notices required by the viewer.
 
 ---
 
@@ -148,6 +162,12 @@ RAW
 
 Folders containing supported images automatically appear in the library. Folder cards look like folders — a tab and body, not a flat photo stack — with a handful of the photos inside them fanned out and tucked into the opening.
 
+<div align="center">
+
+<img src="docs/assets/library.png" width="900" alt="VetroLook Library">
+
+</div>
+
 ### Folder Families
 
 Real filesystems can become messy:
@@ -170,7 +190,7 @@ A family can be split back into its separate folders per-folder, and the choice 
 
 ## Photos View
 
-Folders are only one way to browse a photo collection. Switch to Photos View to ignore folder boundaries and browse every indexed photo as one flat, virtualized grid — searchable, sortable and filterable the same way as the folder view. Photos are grouped by their local date into a day-by-day timeline.
+Folders are only one way to browse a photo collection. Switch to Photos View to ignore folder boundaries and browse every indexed photo as one flat, virtualized grid — searchable, sortable and filterable the same way as the folder view. Grouping that grid by capture date into a day-by-day timeline (Today / Yesterday / by month) is planned but not built yet.
 
 ## Photo Stacks
 
@@ -189,6 +209,12 @@ Automatically detecting bursts (several near-identical shots taken seconds apart
 ## Image Information
 
 The floating Info panel provides technical information without covering the image with permanent UI.
+
+<div align="center">
+
+<img src="docs/assets/info.png" width="500" alt="VetroLook Info panel">
+
+</div>
 
 Available information includes:
 
@@ -318,7 +344,7 @@ VetroLook is under active development.
 - Native OLE drag-and-drop (CF_HDROP)
 - Direct-file navigation context (Explorer → Viewer → folder → library, synthesized when needed)
 - Quick Look-style Space preview from Explorer
-- Standalone installer and uninstaller
+- Standard installer packages (Inno Setup, MSI, MSIX) with OS-managed uninstall
 
 **In progress**
 

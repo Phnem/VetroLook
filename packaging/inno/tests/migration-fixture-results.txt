@@ -1,0 +1,13 @@
+PASS custom entry prefers QuietUninstallString
+PASS custom entry adds historical quiet flag
+PASS Inno entry receives silent flags
+PASS Inno entry prefers registered QuietUninstallString
+PASS custom fallback preserves an existing historical quiet flag
+PASS reject wrong display name
+PASS reject wrong custom publisher
+PASS reject wrong install location
+PASS reject uninstaller outside VetroLook directory
+PASS reject non-Inno executable for Inno key
+PASS reject guessed custom uninstaller filename
+PASS reject malformed Inno uninstaller filename
+SUMMARY PASS

@@ -1,0 +1,14 @@
+2026-09-07 refinement verification
+Build: Release x64, dist/VetroView.exe, build-refinement.log.
+Runtime tests: tests/runtime-final.log, failures=0.
+Added checks: full-canvas fit; device-context/input DPI agreement;
+animated off-centre zoom anchor, including overlapping wheel input;
+maximise and restore preserving 1100x760 client bounds.
+Existing checks: JPEG, PNG, WebP, AVIF, EXR, GIF, BMP; pan; resize; sibling navigation.
+Native UI verification: rounded window without the former white rim;
+image reaches canvas edge; frosted menu samples photograph;
+maximise and restore; Explorer active second tab out of three;
+Space opens image-only rounded preview, Space closes;
+preview still works after closing the normal viewer.
+Source before changes: backups/20260907-010905/src.
+No source image was saved, shared, printed or deleted during UI verification.

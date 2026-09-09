@@ -18,7 +18,7 @@ const wchar_t* Capabilities=L"Software\\VetroLook\\Capabilities";
 const wchar_t* AppName=L"Vetro Look";
 const wchar_t* RunKey=L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t* Extensions[]={L".jpg",L".jpeg",L".jfif",L".png",L".gif",L".webp",L".avif",L".exr",
- L".bmp",L".tif",L".tiff",L".ico",L".heic",L".heif",L".cr2",L".cr3",L".nef",L".arw",L".dng",
+ L".bmp",L".tif",L".tiff",L".ico",L".heic",L".heif",L".psd",L".psb",L".cr2",L".cr3",L".nef",L".arw",L".dng",
  L".raf",L".rw2",L".orf",L".pef"};
 
 std::wstring ExecutablePath(){

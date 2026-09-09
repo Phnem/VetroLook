@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <!--
+    Name and Publisher are PLACEHOLDERS. Before a real Microsoft Store
+    submission, both must be replaced with the exact, case-sensitive values
+    reserved for this app under Partner Center -> Product identity (Store
+    validation rejects a package whose Identity does not match verbatim).
+  -->
+  <Identity Name="Phnem.VetroLook" Publisher="CN=VetroLook Dev" Version="{{VERSION}}.0" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>VetroLook</DisplayName>
+    <PublisherDisplayName>VetroLook</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="VetroLook" Executable="VetroLook.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="VetroLook"
+        Description="Fast native image viewer for Windows"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="vetrolookimages">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.jpg</uap:FileType>
+              <uap:FileType>.jpeg</uap:FileType>
+              <uap:FileType>.jfif</uap:FileType>
+              <uap:FileType>.png</uap:FileType>
+              <uap:FileType>.gif</uap:FileType>
+              <uap:FileType>.webp</uap:FileType>
+              <uap:FileType>.avif</uap:FileType>
+              <uap:FileType>.exr</uap:FileType>
+              <uap:FileType>.bmp</uap:FileType>
+              <uap:FileType>.tif</uap:FileType>
+              <uap:FileType>.tiff</uap:FileType>
+              <uap:FileType>.ico</uap:FileType>
+              <uap:FileType>.heic</uap:FileType>
+              <uap:FileType>.heif</uap:FileType>
+              <uap:FileType>.psd</uap:FileType>
+              <uap:FileType>.psb</uap:FileType>
+              <uap:FileType>.cr2</uap:FileType>
+              <uap:FileType>.cr3</uap:FileType>
+              <uap:FileType>.nef</uap:FileType>
+              <uap:FileType>.arw</uap:FileType>
+              <uap:FileType>.dng</uap:FileType>
+              <uap:FileType>.raf</uap:FileType>
+              <uap:FileType>.rw2</uap:FileType>
+              <uap:FileType>.orf</uap:FileType>
+              <uap:FileType>.pef</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

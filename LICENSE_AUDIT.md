@@ -1,64 +1,124 @@
-# VetroLook — аудит лицензий и происхождения кода
+# Dependency and licence audit
 
-Дата аудита: 7 сентября 2026. Это технический аудит исходного дерева, а не юридическое заключение.
+Vetro Look is distributed under **GPL-3.0-or-later**. Every dependency below was
+checked for licence compatibility with that, for what it costs to build on
+Windows, and for whether it earns its place — a library added for one field
+that existing code already reads reliably is a liability, not an asset.
 
-## Метод
+Binary size is measured on the real Release build: `dist/VetroLook.exe`.
 
-- Проверены все компилируемые файлы из `CMakeLists.txt`, вендорские каталоги и фактическая линковка.
-- Текущие файлы сравнивались с локальными checkout'ами доноров по нормализованным последовательностям строк и ручной проверкой функций.
-- Для QuickView найдено 440 совпадений восьмистрочных отпечатков, относящихся к двум EXIF-файлам. Для QuickLook найдено 0 непрерывных совпадений из шести строк в `explorer.cpp`; вывод ниже не основан на совпадении API или общей идее.
+| Before this pass | After this pass | Delta |
+|---|---|---|
+| 3 674 624 bytes (3.50 MB) | 6 410 752 bytes (6.11 MB) | **+2.61 MB** |
 
-## Подтверждённые GPL-компоненты
+Plus 5.2 MB of Lensfun XML installed beside the executable (see below).
 
-### QuickView
+---
 
-- **VetroLook:** `third_party/exif.cpp`, `third_party/exif.h`.
-- **Источник:** `QuickView/QuickView/exif.cpp`, `QuickView/QuickView/exif.h`, commit `3ab7d110ccbd9b5e3c4882c205abdbb0d3f1a62b`.
-- **Доказательство:** `git diff --no-index --stat` для `exif.cpp` показывает только 4 изменённые строки: добавлен атрибуционный комментарий и `#include "pch.h"` заменён на `#include <cstring>`. Содержательная реализация `Rational`, `IFEntry`, JPEG/TIFF/EXIF-разбор и заголовок совпадают. Это не сходство API.
-- **Объём:** 29,310 байт `.cpp` и 6,956 байт `.h`; практически полный файл донора, существенная самостоятельная часть программы.
-- **Лицензия:** QuickView — GPL-3.0; сам исходник не несёт более узкой лицензии, а VetroLook корректно фиксирует происхождение в notices.
-- **Последствие:** распространение комбинированной программы с этим компонентом должно соответствовать GPL-3.0-or-later; весь распространяемый VetroLook нельзя выдать только под MIT или proprietary/non-commercial условиями.
+## Added
 
-### QuickLook
+### Exiv2 0.28.7 — **adopted**
 
-- **VetroLook:** `src/explorer.cpp`.
-- **Источник:** `QuickLook.Native/QuickLook.Native32/Shell32.cpp` и `HelperMethods.cpp`, commit `60eea46ae2efaf29c9c3a80c61a618ad774bea20`.
-- **Доказательство:** файл VetroLook сам прямо атрибутирует адаптацию. Ручное сравнение подтверждает тот же специфический Explorer-поток: `IShellWindows` → `IServiceProvider` → `IShellBrowser` → `QueryActiveShellView` → `SVGIO_SELECTION` → `IDataObject`/`CF_HDROP`, включая сопоставление активной `ShellTabWindowClass`. При этом непрерывных шестистрочных совпадений не найдено, поэтому это не заявляется как дословная копия всего файла, а как адаптация, которую разумно считать GPL-покрытой до независимой clean-room реализации.
-- **Объём:** 3,948 байт; ограниченный компонент интеграции с Explorer, не основной рендерер/UI.
-- **Лицензия:** QuickLook GPL-3.0-or-later.
-- **Последствие:** независимо от меньшего объёма, для выпуска следует сохранять GPL-режим и атрибуцию.
+* **Licence:** GPL-2.0-or-later. Compatible with GPL-3.0-or-later: the "or
+  later" clause lets it be combined into a GPLv3 work. The combined binary is
+  GPLv3.
+* **Linking:** static. Building `exiv2.lib` (26.6 MB unstripped) and letting
+  `/OPT:REF` discard what is unreachable is what the +2.61 MB above reflects,
+  together with expat and the SIMD kernels.
+* **Transitive dependencies:** expat only, and only because XMP needs it. PNG
+  support (zlib), BMFF/AVIF containers (brotli), video, `inih` and NLS are all
+  turned **off** — the application has its own decoders for those formats and
+  only wants Exiv2 for metadata.
+* **Windows build:** straightforward with the bundled CMake from Visual Studio
+  Build Tools. No package manager, no MSYS2. Configured and built as an
+  `ExternalProject`, matching how libjpeg-turbo is already handled.
+* **Why it earns its place:** EXIF, IPTC, XMP and MakerNotes from one reader,
+  and `easyaccess` knows where each manufacturer hides the lens name — a Nikon
+  Z lens lives in the MakerNote, not in `Exif.Photo.LensModel`. The previous
+  parser (`third_party/exif.cpp`, easyexif) read none of IPTC, XMP or
+  MakerNotes. This is not one field.
+* **NOTICE requirements:** GPL-2.0 requires the licence text and the source
+  offer, both already satisfied by the project's own GPL distribution terms.
+  Recorded in `THIRD_PARTY_NOTICES.txt`.
 
-## Библиотеки, встроенные или слинкованные в текущий EXE
+### Adobe XMP Toolkit SDK — **adopted, through Exiv2**
 
-`CMakeLists.txt` статически линкует `turbojpeg-static`, `webpdecoder`, `webpdemux`, `vetro_raw` (полная компиляция LibRaw), `vetro_exr` (TinyEXR + miniz) и `avif` с импортированной статической `dav1d::dav1d`. `src/wuffs.cpp` компилирует единый файл `wuffs/release/c/wuffs-v0.4.c` через `#define WUFFS_IMPLEMENTATION`.
+* **Licence:** BSD-3-Clause. Compatible.
+* Exiv2 vendors a trimmed XMP Toolkit in `exiv2/xmpsdk` (1.1 MB of source) and
+  builds it as `exiv2-xmp.lib` when `EXIV2_ENABLE_XMP=ON`. Integrating the
+  upstream SDK separately would mean two copies of the same code in one binary,
+  so the vendored one is used and no separate dependency was added.
+* **Attribution is still required** and is recorded in
+  `THIRD_PARTY_NOTICES.txt` under its own heading, not folded into Exiv2's.
 
-- **LibRaw:** LGPL-2.1 или CDDL-1.0 по выбору; текущие notices выбирают LGPL-2.1. Статическое связывание не делает основной код GPL, но при выпуске вне GPL требует, среди прочего, предоставить исходники/объекты или иной предусмотренный LGPL способ relink. В данном GPL-релизе всё равно нужны соответствующие исходники и notices.
-- **libjpeg-turbo:** IJG + BSD-3-Clause; не copyleft. Требуются copyright/license notices.
-- **Wuffs:** MIT OR Apache-2.0; встроенный исходник, не GPL. Сохранить MIT/Apache текст и NOTICE, если применим.
-- **libwebp:** BSD-3-Clause; статически слинкована, notices обязательны, copyleft нет.
-- **libavif:** BSD-2-Clause; статически слинкована. Использует dav1d.
-- **dav1d:** BSD-2-Clause; статически слинкована через libavif.
-- **TinyEXR:** BSD-3-Clause; статически слинкована вместе с bundled miniz и собственными notices. Сохранить все указанные лицензии вложенных частей.
-- **libjxl:** BSD-3-Clause исходники есть в исходной рабочей папке, но не добавлены в `CMakeLists.txt`, не включены и не линкуются; в текущий VetroLook не входит.
+### libexpat 2.7.1 — **adopted (required by XMP)**
 
-Windows DLL (`d2d1`, `dwrite`, `windowscodecs`, `shell32` и т. п.) — системные компоненты Windows, не копируемые исходники VetroLook; из этого дерева нет доказательства, что они задают лицензию проекта.
+* **Licence:** MIT. Compatible.
+* Static, ~200 KB of object code. Built with `XML_STATIC` so its headers do not
+  declare `dllimport`.
+* Also used directly by `src/lensdb.cpp`, which needs an XML parser anyway — so
+  it serves two purposes rather than one.
 
-## Выводы
+### NASM 2.16.03 — **build tool, not a dependency**
 
-1. **Текущий VetroLook является распространяемой GPL-комбинацией.** Наиболее сильное доказательство — практически дословный EXIF-код QuickView GPL-3.0; QuickLook добавляет отдельный GPL-риск. Это не вывод только из общей идеи Quick Look или из использования Windows Shell API.
-2. **Лицензировать весь текущий проект только под MIT нельзя.** MIT можно было бы дать лишь собственной независимой части как дополнительное разрешение, но не всему комбинированному выпуску с GPL-кодом.
-3. **Собственная non-commercial лицензия для текущего полного выпуска несовместима с GPL-полученными частями.** Дополнительные ограничения нельзя накладывать на GPL-права получателя.
-4. **Чтобы снять GPL-обязательства:** полностью удалить `third_party/exif.cpp/.h` и заменить независимой реализацией/подходящей permissive библиотекой; переписать `src/explorer.cpp` по независимой спецификации Windows Shell, не сверяясь с QuickLook, либо удалить эту функцию; удалить донорские GPL-attribution/notices только после удаления кода и проверки. Затем повторно проверить все файлы и выбрать разрешительные альтернативы для статического LibRaw (LGPL всё ещё потребует выполнения своих условий) либо обеспечить LGPL-compliant dynamic/relinkable distribution. Одной смены заголовков или имени файлов недостаточно.
+* Not linked and not distributed. It assembles libjpeg-turbo's SIMD kernels.
+* `build.ps1` fetches it; if that fails the build **stops with an explanation**
+  rather than quietly producing a scalar libjpeg-turbo. `VETRO_ALLOW_SCALAR_JPEG=1`
+  opts into the slow build deliberately.
 
-| Source | Evidence | License | Copied/Linked/Inspired | Impact on VetroLook | Action needed |
-|---|---|---|---|---|---|
-| QuickView | `third_party/exif.cpp` differs from donor by 4 lines; 440 eight-line fingerprints across EXIF files | GPL-3.0 | Copied/adapted | GPL applies to distributed combined work | Keep GPL/source/notices, or replace both EXIF files cleanly |
-| QuickLook | Explicit attribution plus matching specialised Explorer selection workflow; no six-line verbatim run | GPL-3.0-or-later | Adapted | GPL risk/obligation for combined release | Keep GPL/source/notices, or clean-room rewrite/remove |
-| LibRaw | `file(GLOB_RECURSE ... LibRaw/src/*.cpp)` → static `vetro_raw` | LGPL-2.1 option or CDDL-1.0 | Statically linked | Not GPL by itself; LGPL distribution conditions apply | Ship source/notices and relinking path; review before non-GPL distribution |
-| libjpeg-turbo | Static `turbojpeg-static` | IJG + BSD-3-Clause | Statically linked | Notices only | Preserve notices/license text |
-| Wuffs | Direct inclusion `wuffs-v0.4.c` | MIT OR Apache-2.0 | Embedded source | Notices/license obligations, no GPL | Preserve license/NOTICE |
-| libwebp | Static `webpdecoder`, `webpdemux` | BSD-3-Clause | Statically linked | Notices only | Preserve notices/license text |
-| libavif | Static `avif` | BSD-2-Clause | Statically linked | Notices only | Preserve notices/license text |
-| dav1d | Imported static `libdav1d.a` | BSD-2-Clause | Statically linked | Notices only | Preserve notices/license text |
-| TinyEXR/miniz | Static `vetro_exr` | BSD-3-Clause plus bundled notices | Embedded/static | Notices only | Preserve full TinyEXR/miniz notices |
-| libjxl | No target/include/link reference | BSD-3-Clause | Not used | No current distribution impact | Do not claim JPEG XL support until a decoder is built and linked |
+### Lensfun — **library rejected, database adopted**
+
+* **Library licence:** LGPL-3.0. Compatible in principle.
+* **Rejected because of its build footprint.** `lensfun/CMakeLists.txt` has
+  `FIND_PACKAGE(GLIB2 REQUIRED)` — GLib is not optional. GLib on Windows means
+  vcpkg or MSYS2, a second package manager in a tree that currently vendors
+  only self-contained sources, and a runtime DLL beside the executable. That is
+  a disproportionate price for lens identification.
+* **Database adopted.** `lensfun/data/db` is licensed **CC-BY-SA 3.0**,
+  separately from the library, and is redistributable with attribution. It is
+  vendored at `third_party/lensfun-db/` (5.2 MB, 59 XML files, 1567 lenses and
+  1051 camera bodies) and installed beside the executable.
+* `src/lensdb.cpp` reads it with expat and implements Lensfun's own published
+  correction models (`ptlens`/`poly3`/`poly5` distortion, `pa` vignetting,
+  `poly3` transverse chromatic aberration), interpolated across focal length.
+  No GLib, no DLL, and the same calibration data the library would have used.
+* **CC-BY-SA 3.0 obligations:** attribution and share-alike on the database
+  itself. It is shipped unmodified, with `COPYING.CC_BY-SA_3.0` alongside it,
+  and credited in `THIRD_PARTY_NOTICES.txt`.
+
+---
+
+## Considered and not added
+
+| Library | Why not |
+|---|---|
+| **OpenImageIO** | Pulls in Boost, OpenEXR, libtiff, libpng, and a plugin architecture. The viewer already decodes every format it supports. Explicitly out of scope. |
+| **libvips** | GLib again, plus a threaded pipeline model that does not match a single-image viewer. |
+| **GEGL** | An editing graph framework for an application with five drawing tools. |
+| **zlib (for Exiv2 PNG)** | Exiv2's PNG support is only needed to read metadata out of PNG, which the Windows Imaging Component already does here. Left off. |
+| **Brotli (for Exiv2 BMFF)** | BMFF is disabled; libavif and dav1d decode AVIF, and `Exiv2::enableBMFF(false)` is set explicitly. |
+
+---
+
+## Existing dependencies, unchanged
+
+libjpeg-turbo (BSD-3-Clause + IJG), LibRaw (LGPL-2.1/CDDL), libwebp
+(BSD-3-Clause), libavif (BSD-2-Clause), dav1d (BSD-2-Clause), TinyEXR
+(BSD-3-Clause), miniz (MIT), Wuffs (Apache-2.0/MIT), easyexif (BSD-2-Clause).
+
+`third_party/exif.cpp` (easyexif) is **retained**, not deleted: `src/decoders.cpp`
+reads the EXIF orientation from it during a JPEG decode, on the decode worker,
+without needing Exiv2's much larger machinery in that hot path. See
+"What stayed on the old parser" in `REPORT.md`.
+
+---
+
+## Files to keep in step
+
+* `THIRD_PARTY_NOTICES.txt` — one entry per redistributed component.
+* `CMakeLists.txt` — the `ExternalProject_Add` calls for expat and Exiv2, the
+  `find_program(VETRO_NASM ...)` probe, and the post-build copy of
+  `third_party/lensfun-db`.
+* `build.ps1` — NASM acquisition and the SIMD report.
+* `build-packages.ps1` / `packaging/` — the installer must carry `lensfun-db/`
+  beside `VetroLook.exe`, or lens matching silently reports "not installed".

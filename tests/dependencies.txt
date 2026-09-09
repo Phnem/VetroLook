@@ -1,0 +1,30 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file dist\VetroLook.exe
+
+File Type: EXECUTABLE IMAGE
+
+  Image has the following dependencies:
+
+    d2d1.dll
+    DWrite.dll
+    dwmapi.dll
+    SHELL32.dll
+    SHLWAPI.dll
+    ole32.dll
+    COMDLG32.dll
+    KERNEL32.dll
+    USER32.dll
+    WS2_32.dll
+
+  Summary
+
+       AB000 .data
+        1000 .fptable
+       12000 .pdata
+       9C000 .rdata
+        2000 .reloc
+        1000 .rsrc
+      1F3000 .text

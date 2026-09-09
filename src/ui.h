@@ -74,7 +74,17 @@ enum Str{
  S_FilterTitle,S_FilterFormats,S_FilterSize,S_FilterKind,S_FilterRaw,S_FilterRegular,
  S_FilterProfile,S_FilterAny,S_FilterNoProfile,S_FilterClear,S_FilterApply,
  S_Indexing,S_Found,S_Folder1,S_Folder2to4,S_Folder5plus,S_Photos,S_LibraryUpdated,S_LibraryUpdating,
- S_NoFolders,S_NoPhotos,S_AppTagline,S_Rescan,
+ S_NoFolders,S_NoPhotos,S_NoPhotosFound,S_AppTagline,S_Rescan,
+ S_WheelLabel,S_WheelZoom,S_WheelNav,
+ S_Vectorscope,S_Install,S_Remove,S_TcNotFound,S_TcRunning,S_TcReplace,S_TcCancelled,
+ S_TcFailed,S_TcInstalled,S_TcRemoved,
+ // Library modes, the Favourites collection, and the read-only Adobe fields.
+ S_Timeline,S_Folders,S_Favourites,S_NoFavourites,S_NoFavouritesHint,S_NoFavouritesHint2,
+ S_SecColour,S_SecAuthor,S_SecAdobe,S_SecLens,
+ S_XmpRating,S_XmpLabel,S_Rejected,S_XmpFrom,S_Sidecar,S_Embedded,
+ S_Author,S_Copyright,S_Keywords,S_Title,S_Description,S_Software,
+ S_LensProfile,S_ProfileFound,S_ProfileMissing,S_Distortion,S_Vignette,S_Chromatic,
+ S_LensCorrection,S_Auto,S_MatchedCamera,S_MatchedLens,
  S_COUNT
 };
 extern int language;               // 0 Russian, 1 English
@@ -112,29 +122,59 @@ float Measure(const std::wstring& s,Face f,float maxWidth);
 void  Icon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke=1.7f,bool fill=false,float rotation=0);
 extern const wchar_t *IcBack,*IcMinus,*IcPlus,*IcInfo,*IcCopy,*IcCheck,*IcHeart,*IcRotate,*IcExpand,*IcCompress,
  *IcDots,*IcMin,*IcMax,*IcRestore,*IcClose,*IcShare,*IcSave,*IcSaveAs,*IcPrint,*IcTrash,*IcMoon,*IcSun,*IcGlobe,
- *IcCrop,*IcPen,*IcArrow,*IcMarquee,*IcChevron,*IcChevronL,*IcDefault,*IcSpace,
+ *IcCrop,*IcPen,*IcArrow,*IcMarquee,*IcChevron,*IcChevronL,*IcDefault,*IcSpace,*IcMouse,
  *IcSearch,*IcSortLines,*IcFilter,*IcFolderIc,*IcGridPhoto,*IcCheckbox;
 
 // ------------------------------------------------------------- metadata ----
 struct Field{std::wstring label,value;};
 struct Meta{
  std::wstring path;
- std::vector<Field> file,camera,location;
+ // One section per Info heading. A section with no rows is not drawn, so a
+ // JPEG off a phone and a RAW off a calibrated body both look deliberate.
+ std::vector<Field> file,camera,colour,location,author,adobe,lens;
  bool ready=false,hasCamera=false,hasLocation=false;
  double dpiX=0,dpiY=0;unsigned orientation=0;
  double lat=0,lon=0;bool hasGps=false;
+
+ // External XMP rating and label. Read-only: these come from Lightroom or
+ // Bridge, they are never written here, and they are never mixed with the
+ // Vetro Look favourite in either direction.
+ bool hasRating=false;int rating=0;      // -1 rejected, 1..5 stars
+ std::wstring label,xmpSource;
+
+ // Lensfun match for this frame.
+ bool lensReady=false,lensMatched=false;
+ bool lensDistortion=false,lensVignetting=false,lensTca=false,lensGeometry=false;
+ std::wstring lensName,lensProfile,lensNote;
  uint32_t hist[4][256]{};           // R G B Luma
  uint32_t histPeak[4]{};
+ // Vectorscope: chroma density on the UV plane, hue as angle, saturation as
+ // distance from the centre. Filled from the same sampled pixels as the histogram.
+ static constexpr int ScopeEdge=128;
+ uint32_t scope[ScopeEdge*ScopeEdge]{};
+ uint32_t scopePeak=0;
  bool histReady=false;
  float clippedHigh=0,clippedLow=0;
 };
+// Two stages, because they cost two very different amounts. The quick pass
+// reads metadata only and lands in tens of milliseconds, so the viewer header
+// can show a rating before a RAW has finished demosaicing; the full pass adds
+// the histogram and scopes, and needs the decoded pixels.
 void MetaRequest(const std::wstring& path,uint64_t id,const std::shared_ptr<Image>& decoded,HWND notify,UINT message);
+void MetaRequestQuick(const std::wstring& path,uint64_t id,HWND notify,UINT message);
 bool MetaCollect(uint64_t id,Meta& out);   // true when a fresh result matched id
 void MetaStop();
+
+// ---------------------------------------------------------- integrations ---
+enum TcStatus{TcMissing,TcAvailable,TcInstalled};
+TcStatus TotalCommanderStatus();
+bool TotalCommanderInstall(HWND owner,std::wstring& note);
+bool TotalCommanderRemove(std::wstring& note);
 
 // ------------------------------------------------------------ thumbnails ---
 void ThumbStart(HWND notify,UINT message);
 void ThumbStop();
 void ThumbRequest(const std::wstring& path);
+void ThumbPrioritize(const std::wstring& path);
 std::shared_ptr<Image> ThumbLookup(const std::wstring& path);
 void ThumbTrim(const std::vector<std::wstring>& keep);
