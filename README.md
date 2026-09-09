@@ -49,7 +49,7 @@ rows instead of materialising a full-size BGRA image. RAW embedded previews
 are ranked by useful dimensions before decode. The app keeps the trusted AVIF
 decode path where the platform decoder does not match it closely enough.
 
-The shipped MSI, Inno Setup installer, MSIX, and portable ZIP now all carry
+The shipped MSI, Inno Setup installer, and portable ZIP now all carry
 the Lensfun profile database and the runtime notices required by the viewer.
 
 ---
@@ -216,13 +216,15 @@ Heavy metadata and histogram work happens off the UI thread, so opening the pane
 
 VetroLook is built around a modular decoder pipeline.
 
-**Standard images:** JPEG, PNG, GIF, BMP, TIFF, ICO
+**Standard images:** JPEG, PNG, BMP, TIFF, ICO
+
+**GIF:** static GIFs are supported; animated GIFs display their first frame only
 
 **Modern formats:** WebP, AVIF, HEIC / HEIF
 
 **Camera RAW** (via LibRaw): CR2, CR3, NEF, ARW, DNG, RAF, RW2, ORF, PEF, and other LibRaw-supported formats
 
-**Professional / HDR:** OpenEXR (tone-mapped for display)
+**Professional formats:** PSD, PSB, OpenEXR (tone-mapped for display)
 
 JPEG XL is not supported yet.
 
@@ -259,6 +261,30 @@ Performance principles:
 - GPU composition for interface animations
 
 A disk-persistent thumbnail cache (surviving app restarts, with size-bucketed entries and LRU eviction) is planned; today's thumbnail cache is in-memory only and rebuilds each session.
+
+## Benchmarks
+
+The screenshots below show the Windows x64 GUI measurements for the same test
+machine and image fixtures. Lower is better: cold-start and RAW-open figures
+are based on 20 fresh launches per app; navigation figures are medians across
+500 transitions (80 transitions for the mixed-format folder). They are useful
+comparisons for this workload, not universal performance guarantees.
+
+<div align="center">
+  <img src="docs/assets/benchmarks-overview.png" width="1000" alt="Benchmark results for cold start, RAW opening, and image navigation">
+  <br><br>
+  <img src="docs/assets/benchmarks-navigation.png" width="1000" alt="Benchmark results for random RAW navigation and mixed-format switching">
+</div>
+
+| Scenario | VetroLook | Result shown |
+| --- | ---: | --- |
+| Cold start to first JPEG | 641 ms | 2.1× faster than ImageGlass; up to 5.2× faster than ACDSee Free |
+| Open a camera RAW file | 637 ms | 153 ms ahead of ImageGlass |
+| Next standard photo | 14.9 ms | about 4.9× faster than FastRawViewer |
+| Random standard photos | 18.4 ms | about 3.3× faster than ACDSee Free |
+| Next camera RAW | 15.3 ms | about 4.0× faster than ACDSee Free |
+| Random camera RAW | 14.8 ms | about 4.2× faster than ACDSee Free |
+| Switch between formats | 15.5 ms | about 4.7× faster than ACDSee Free; all 80 transitions completed |
 
 ## Motion system
 
@@ -326,7 +352,7 @@ VetroLook is under active development.
 - Native OLE drag-and-drop (CF_HDROP)
 - Direct-file navigation context (Explorer → Viewer → folder → library, synthesized when needed)
 - Quick Look-style Space preview from Explorer
-- Standard installer packages (Inno Setup, MSI, MSIX) with OS-managed uninstall
+- Standard installer packages (Inno Setup and MSI) with OS-managed uninstall
 
 **In progress**
 
