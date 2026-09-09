@@ -264,27 +264,40 @@ A disk-persistent thumbnail cache (surviving app restarts, with size-bucketed en
 
 ## Benchmarks
 
-The screenshots below show the Windows x64 GUI measurements for the same test
-machine and image fixtures. Lower is better: cold-start and RAW-open figures
-are based on 20 fresh launches per app; navigation figures are medians across
-500 transitions (80 transitions for the mixed-format folder). They are useful
-comparisons for this workload, not universal performance guarantees.
+Windows x64 GUI measurements on the same test machine and image fixtures.
+Lower is better. Cold-start and camera-RAW opening results are from 20 fresh
+launches per app; navigation results are medians across 500 transitions, except
+the mixed-format folder, which contains 80 transitions.
 
-<div align="center">
-  <img src="docs/assets/benchmarks-overview.png" width="1000" alt="Benchmark results for cold start, RAW opening, and image navigation">
-  <br><br>
-  <img src="docs/assets/benchmarks-navigation.png" width="1000" alt="Benchmark results for random RAW navigation and mixed-format switching">
-</div>
+### Startup and opening
 
-| Scenario | VetroLook | Result shown |
-| --- | ---: | --- |
-| Cold start to first JPEG | 641 ms | 2.1× faster than ImageGlass; up to 5.2× faster than ACDSee Free |
-| Open a camera RAW file | 637 ms | 153 ms ahead of ImageGlass |
-| Next standard photo | 14.9 ms | about 4.9× faster than FastRawViewer |
-| Random standard photos | 18.4 ms | about 3.3× faster than ACDSee Free |
-| Next camera RAW | 15.3 ms | about 4.0× faster than ACDSee Free |
-| Random camera RAW | 14.8 ms | about 4.2× faster than ACDSee Free |
-| Switch between formats | 15.5 ms | about 4.7× faster than ACDSee Free; all 80 transitions completed |
+| App | First photo after cold start | Open a camera RAW file |
+| --- | ---: | ---: |
+| **VetroLook** | **641 ms** | **637 ms** |
+| Windows Photos | 1,079 ms | 939 ms |
+| ImageGlass | 1,358 ms | 790 ms |
+| ACDSee Free | 3,342 ms | 3,322 ms |
+| FastRawViewer | 1,810 ms | 1,801 ms |
+
+VetroLook reaches the first JPEG **2.1× faster than ImageGlass** and **5.2×
+faster than ACDSee Free**. It opens the tested camera RAW file **153 ms ahead
+of ImageGlass**.
+
+### Browsing and format switching
+
+| Scenario | VetroLook | ACDSee Free | FastRawViewer |
+| --- | ---: | ---: | ---: |
+| Next standard photo | **14.9 ms** | 74.5 ms | 72.4 ms |
+| Random standard photos | **18.4 ms** | 61.2 ms | 72.6 ms |
+| Next camera RAW | **15.3 ms** | 61.1 ms | 85.3 ms |
+| Random camera RAW | **14.8 ms** | 61.7 ms | 79.5 ms |
+| Switch between formats | **15.5 ms** | 72.6 ms | 73.4 ms |
+
+That is **4.9× faster** for the next standard photo, **3.3× faster** for
+random standard photos, **4.0× faster** for the next camera RAW, **4.2×
+faster** for random camera RAW, and **4.7× faster** when switching formats,
+using the closest comparison reported for each case. VetroLook completed all
+80 mixed-format transitions in the measured workload.
 
 ## Motion system
 
