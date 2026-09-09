@@ -17,6 +17,8 @@
 
 <br>
 
+<img src="docs/assets/hero.png" width="900" alt="VetroLook viewer">
+
 </div>
 
 ---
