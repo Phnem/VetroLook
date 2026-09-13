@@ -1,6 +1,54 @@
+# Build output
 build/
-build-release-verify/
-build-dav1d/
-tools/
+build-*/
+dist/
+dist-*/
 *.log
+*.pdb
+*.obj
+*.ilk
+
+# Tools fetched or installed by build.ps1 (meson, ninja, NASM). The fetch script
+# for the playback engine is source and stays tracked.
+tools/*
+!tools/fetch-mpv.ps1
+
+# Vendored binaries: only the headers are part of the source. The libmpv
+# package is fetched by tools/fetch-mpv.ps1; the AI runtime and models are
+# downloaded by the application itself.
+third_party/mpv/*
+!third_party/mpv/include/
+third_party/whisper/*
+!third_party/whisper/include/
+*.gguf
+ggml-*.bin
+
+# Generated test data and results
 tests/images/
+tests/fixtures/*
+!tests/fixtures/raw-public/
+tests/fixtures/raw-public/*
+!tests/fixtures/raw-public/PROVENANCE.txt
+tests/index-fixtures-*/
+tests/action-output*/
+tests/bench/
+tests/invalid/
+tests/*.json
+tests/*.csv
+
+# Release artefacts: published as GitHub release assets, never committed
+release/*
+!release/README.md
+
+# Generated during packaging
+packaging/portable-stage/
+packaging/msix/stage/
+packaging/msix/local-test/
+packaging/inno/tests/out/
+packaging/wix/VetroLook.media.wxi
+
+# Local working copies and notes
+backups/
+.vs/
+.vscode/
+.claude/

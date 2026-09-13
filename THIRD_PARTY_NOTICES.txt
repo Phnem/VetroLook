@@ -38,6 +38,25 @@ and implements Lensfun's published correction models. See LICENSE_AUDIT.md.
 NASM (https://www.nasm.us) is used at build time only, to assemble
 libjpeg-turbo's SIMD kernels. It is not linked and not redistributed.
 
+whisper.cpp and ggml 1.9.4 (https://github.com/ggml-org/whisper.cpp), the
+official release build whisper-cublas-12.4.0-bin-x64 (SHA-256
+af520ddd034d985b55dfeea3e465ed93653ba2aee1a55e865033edc548c272a7), are
+redistributed unmodified in whisper/ beside the executable and loaded at run
+time only when AI subtitles are used. Copyright (c) 2023-2026 The ggml authors.
+Licensed under the MIT License. They are not linked into Vetro Look.
+
+NVIDIA CUDA runtime libraries (cudart64_12.dll, cublas64_12.dll,
+cublasLt64_12.dll) ship inside that whisper.cpp release and are redistributed
+unmodified in whisper/ under the NVIDIA CUDA Toolkit End User License
+Agreement's redistributable-software terms. Copyright (c) NVIDIA Corporation.
+
+The speech model (ggml-large-v3-turbo-q5_0.bin, a conversion of OpenAI Whisper
+large-v3-turbo, MIT License) and the Silero VAD model (ggml-silero-v6.2.0.bin,
+MIT License) are not shipped: they are downloaded on request from
+https://huggingface.co/ggerganov/whisper.cpp and
+https://huggingface.co/ggml-org/whisper-vad and checked against their
+published SHA-256 before use.
+
 Retain these notices when distributing. GPL corresponding source and build scripts,
 and LGPL relinking rights, must accompany an external distribution as required by
 the included licenses. All linked library sources remain in this workspace and

@@ -120,6 +120,13 @@ std::unordered_map<std::wstring,std::vector<PhotoEntry>> photosByFolder; // key:
 std::unordered_map<std::wstring,uint64_t> folderIdByPath; // key: lowercase path -> folders[] key
 std::unordered_map<wchar_t,UsnJournalPos> usnPositions; // per-drive fast-path catch-up state
 std::atomic<bool> stopping{false},scanning{false};
+// Paused by the Resource Governor, never by the index itself. Checked between
+// folders: a folder that has started is finished, so a pause cannot leave half
+// of one recorded.
+std::atomic<bool> paused{false};
+void WaitWhilePaused(){
+ while(paused.load()&&!stopping)Sleep(120);
+}
 std::atomic<uint64_t> knownPhotos{0};
 std::thread scannerThread;
 std::thread priorityThread;
@@ -273,6 +280,8 @@ void WalkTree(const std::wstring& root){
  std::vector<std::wstring> stack{root};
  int sinceNotify=0;
  while(!stack.empty()&&!stopping){
+  WaitWhilePaused();
+  if(stopping)break;
   auto current=std::move(stack.back());stack.pop_back();
   FolderEntry entry;std::vector<PhotoEntry> photos;
   auto subdirs=ScanOneFolder(current,entry,photos);
@@ -572,6 +581,7 @@ void ScannerLoop(){
    doDrives=wantDriveScan;wantDriveScan=false;
   }
   if(!dirty.empty()){
+   WaitWhilePaused();
    FolderEntry entry;std::vector<PhotoEntry> photos;
    if(GetFileAttributesW(dirty.c_str())==INVALID_FILE_ATTRIBUTES)RemoveFolder(dirty);
    else{auto previous=SnapshotPhotosByName(dirty);ScanOneFolder(dirty,entry,photos,&previous);StoreFolder(entry,std::move(photos));}
@@ -637,6 +647,8 @@ FolderState IndexFolderState(const std::wstring& folder){std::lock_guard lock(wo
 uint64_t PhysicalId(const std::wstring& path){return StableId(NormalisePath(path));}
 std::vector<PhotoEntry> IndexInspectDirectory(const std::wstring& path,FolderEntry& folder){std::vector<PhotoEntry> photos;ScanOneFolder(NormalisePath(path),folder,photos,nullptr,false);return photos;}
 bool IndexIsScanning(){return scanning;}
+void IndexSetPaused(bool value){paused.store(value);}
+bool IndexPaused(){return paused.load();}
 uint64_t IndexKnownPhotoCount(){return knownPhotos;}
 std::vector<FolderEntry> IndexSnapshotFolders(){
  std::lock_guard lock(mx);

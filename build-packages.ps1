@@ -24,7 +24,8 @@ param(
     [switch]$SkipAppBuild,
     [string]$Version,
     [switch]$LocalTestSign,
-    [switch]$SkipPortable
+    [switch]$SkipPortable,
+    [switch]$SkipMsix
 )
 $ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
@@ -34,7 +35,7 @@ $ReleaseDir = Join-Path $RepoRoot 'release'
 $PackagingDir = Join-Path $RepoRoot 'packaging'
 
 if (-not $Version) {
-    $cmakeText = Get-Content (Join-Path $RepoRoot 'CMakeLists.txt') -Raw
+    $cmakeText = Get-Content (Join-Path $RepoRoot 'VetroView\CMakeLists.txt') -Raw
     if ($cmakeText -match 'project\(VetroLook VERSION ([\d\.]+)') { $Version = $Matches[1] } else { $Version = '1.0.0' }
 }
 
@@ -42,7 +43,7 @@ Write-Host "VetroLook release packaging -- version $Version"
 
 if (-not $SkipAppBuild) {
     Write-Host 'Building VetroLook.exe (CMake/MSVC)...'
-    & (Join-Path $RepoRoot 'build.ps1')
+    & (Join-Path $RepoRoot 'VetroView\build.ps1')
     if ($LASTEXITCODE) { throw 'Application build failed' }
 }
 
@@ -52,7 +53,7 @@ if (-not (Test-Path $ExePath)) {
 
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
-Copy-Item (Join-Path $RepoRoot 'LICENSE') (Join-Path $ReleaseDir 'LICENSE') -Force
+Copy-Item (Join-Path $RepoRoot 'VetroView\LICENSE') (Join-Path $ReleaseDir 'LICENSE') -Force
 Copy-Item (Join-Path $DistDir 'THIRD_PARTY_NOTICES.txt') (Join-Path $ReleaseDir 'THIRD_PARTY_NOTICES.txt') -Force
 
 $targets = @(
@@ -60,8 +61,9 @@ $targets = @(
     @{ Name = 'MSIX'; File = "VetroLook-$Version-x64.msix"; Script = 'msix\build-msix.ps1' }
     @{ Name = 'Inno'; File = "VetroLook-$Version-Setup.exe"; Script = 'inno\build-inno.ps1' }
 )
+if ($SkipMsix) { $targets = @($targets | Where-Object { $_.Name -ne 'MSIX' }) }
 
-Write-Host 'Building MSI, MSIX and Inno Setup installers in parallel...'
+Write-Host "Building installers in parallel: $(($targets | ForEach-Object { $_.Name }) -join ', ')..."
 $jobs = foreach ($t in $targets) {
     $scriptPath = Join-Path $PackagingDir $t.Script
     $scriptDir = Split-Path $scriptPath -Parent
@@ -93,6 +95,11 @@ if (-not $SkipPortable) {
     if (Test-Path $stagePortable) { Remove-Item $stagePortable -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stagePortable | Out-Null
     Copy-Item $ExePath (Join-Path $stagePortable 'VetroLook.exe') -Force
+    # The playback engine is loaded by name from beside the executable; without
+    # it a portable copy is an image viewer only.
+    $mpv = Join-Path $DistDir 'libmpv-2.dll'
+    if (-not (Test-Path $mpv)) { throw "libmpv-2.dll not found beside $ExePath" }
+    Copy-Item $mpv (Join-Path $stagePortable 'libmpv-2.dll') -Force
     foreach ($doc in 'README.txt', 'THIRD_PARTY_NOTICES.txt') {
         $src = Join-Path $DistDir $doc
         if (Test-Path $src) { Copy-Item $src (Join-Path $stagePortable $doc) -Force }
@@ -115,6 +122,8 @@ if (-not $SkipPortable) {
 $readmeTemplate = Join-Path $PackagingDir 'release-readme.template.md'
 if (Test-Path $readmeTemplate) {
     $readme = ([System.IO.File]::ReadAllText($readmeTemplate, [System.Text.Encoding]::UTF8)).Replace('{{VERSION}}', $Version)
+    if ($SkipMsix) { $readme = [regex]::Replace($readme, '(?s)<!-- msix -->.*?<!-- /msix -->\r?\n?', '') }
+    else { $readme = $readme.Replace("<!-- msix -->`r`n", '').Replace("<!-- msix -->`n", '').Replace("<!-- /msix -->`r`n", '').Replace("<!-- /msix -->`n", '') }
     [System.IO.File]::WriteAllText((Join-Path $ReleaseDir 'README.md'), $readme, (New-Object System.Text.UTF8Encoding($false)))
 }
 
@@ -143,6 +152,6 @@ Write-Host "  [OK]   SHA256SUMS -> $sumsPath"
 
 if (-not $allOk) { exit 1 }
 
-$releaseAssets = "VetroLook-$Version-Setup.exe, VetroLook-$Version-x64.msi, VetroLook-$Version-x64.msix, SHA256SUMS.txt"
+$releaseAssets = "VetroLook-$Version-Setup.exe, VetroLook-$Version-x64.msi, " + $(if ($SkipMsix) { '' } else { "VetroLook-$Version-x64.msix, " }) + "SHA256SUMS.txt"
 if (-not $SkipPortable) { $releaseAssets += ", VetroLook-$Version-Portable.zip (optional)" }
 Write-Host "`nGitHub Release assets (release\): $releaseAssets"

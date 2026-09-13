@@ -49,6 +49,11 @@ if (Test-Path $nasm) { $env:NASM_PATH=Split-Path $nasm -Parent }
 
 & "$PSScriptRoot/build-dav1d.cmd"
 if($LASTEXITCODE){throw 'dav1d build failed'}
+
+# The playback engine: the pinned libmpv development package (SHA-256 checked),
+# unpacked into third_party/mpv. Without it the build is an image viewer only.
+& "$PSScriptRoot/tools/fetch-mpv.ps1"
+if($LASTEXITCODE){throw 'libmpv fetch failed'}
 & $cmake -S $PSScriptRoot -B "$PSScriptRoot/build" -G 'Visual Studio 17 2022' -A x64
 if($LASTEXITCODE){throw 'Configure failed'}
 & $cmake --build "$PSScriptRoot/build" --config Release --target VetroLook --parallel 8

@@ -4,6 +4,7 @@
 // Windows reserves the actual default-handler choice for the user, so we only
 // publish the capability and then open the page where they confirm it.
 #include "actions.h"
+#include "media.h"
 #include <shlobj.h>
 #include <shellapi.h>
 #include <aclapi.h>
@@ -12,14 +13,30 @@
 #include <vector>
 
 namespace{
+// Two document types, because Windows shows the type's name to the reader and
+// "Vetro Look Image" over a film is simply wrong. Both open the same
+// executable, which decides what it is looking at for itself.
 const wchar_t* ProgId=L"VetroLook.Image";
+const wchar_t* MediaProgId=L"VetroLook.Media";
 const wchar_t* AppKey=L"Software\\Classes\\Applications\\VetroLook.exe";
 const wchar_t* Capabilities=L"Software\\VetroLook\\Capabilities";
 const wchar_t* AppName=L"Vetro Look";
 const wchar_t* RunKey=L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const wchar_t* Extensions[]={L".jpg",L".jpeg",L".jfif",L".png",L".gif",L".webp",L".avif",L".exr",
- L".bmp",L".tif",L".tiff",L".ico",L".heic",L".heif",L".psd",L".psb",L".cr2",L".cr3",L".nef",L".arw",L".dng",
- L".raf",L".rw2",L".orf",L".pef"};
+// 3 published images only; 4 added video and audio.
+constexpr DWORD AssociationSchemaVersion=4;
+
+// Everything the viewer opens, each with the document type it belongs to. The
+// extensions come from the router's own lists (media.h) rather than from a copy
+// kept here: a copy is how an application ends up offered for a format it
+// cannot open, or -- as happened to video -- not offered for one it can.
+struct Association{std::wstring extension;const wchar_t* progId;};
+std::vector<Association> Associations(){
+ std::vector<Association> all;
+ for(auto kind:{MediaKind::Image,MediaKind::Video,MediaKind::Audio})
+  for(auto& extension:ExtensionsFor(kind))
+   all.push_back({extension,kind==MediaKind::Image?ProgId:MediaProgId});
+ return all;
+}
 
 std::wstring ExecutablePath(){
  wchar_t path[MAX_PATH]{};
@@ -70,7 +87,14 @@ bool ViewerRegistered(){
  wchar_t buffer[32768]{};DWORD size=sizeof(buffer);
  auto key=std::wstring(L"Software\\Classes\\")+ProgId+L"\\shell\\open\\command";
  if(RegGetValueW(HKEY_CURRENT_USER,key.c_str(),nullptr,RRF_RT_REG_SZ,nullptr,buffer,&size)!=ERROR_SUCCESS)return false;
- auto exe=ExecutablePath();return !exe.empty()&&std::wstring(buffer).find(exe)!=std::wstring::npos;
+ auto exe=ExecutablePath();
+ if(exe.empty()||std::wstring(buffer).find(exe)==std::wstring::npos)return false;
+ // A registration published by an older build covers only what that build could
+ // open. The schema number is how this one knows the list has grown -- video and
+ // audio were added to it -- and offers to publish the rest.
+ DWORD schema=0,schemaSize=sizeof(schema);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook",L"AssociationSchema",RRF_RT_REG_DWORD,nullptr,&schema,&schemaSize);
+ return schema>=AssociationSchemaVersion;
 }
 
 bool RegisterAsViewer(std::wstring& error){
@@ -84,28 +108,37 @@ bool RegisterAsViewer(std::wstring& error){
  ok&=Text(AppKey,L"FriendlyAppName",AppName);
  ok&=Text(std::wstring(AppKey)+L"\\shell\\open\\command",nullptr,command);
  ok&=Text(std::wstring(AppKey)+L"\\DefaultIcon",nullptr,icon);
- ok&=Text(progIdKey,nullptr,L"Vetro Look Image");
- ok&=Text(progIdKey,L"FriendlyTypeName",L"Vetro Look Image");
- ok&=Text(progIdKey+L"\\shell\\open\\command",nullptr,command);
- ok&=Text(progIdKey+L"\\DefaultIcon",nullptr,icon);
- ok&=Text(progIdKey+L"\\Application",L"ApplicationName",AppName);
- ok&=Text(progIdKey+L"\\Application",L"ApplicationDescription",L"Native image viewer");
- ok&=Text(progIdKey+L"\\Application",L"ApplicationIcon",icon);
+ auto documentType=[&](const std::wstring& key,const wchar_t* friendly,const wchar_t* description){
+  bool made=true;
+  made&=Text(key,nullptr,friendly);
+  made&=Text(key,L"FriendlyTypeName",friendly);
+  made&=Text(key+L"\\shell\\open\\command",nullptr,command);
+  made&=Text(key+L"\\DefaultIcon",nullptr,icon);
+  made&=Text(key+L"\\Application",L"ApplicationName",AppName);
+  made&=Text(key+L"\\Application",L"ApplicationDescription",description);
+  made&=Text(key+L"\\Application",L"ApplicationIcon",icon);
+  return made;
+ };
+ ok&=documentType(progIdKey,L"Vetro Look Image",L"Native image viewer");
+ ok&=documentType(std::wstring(L"Software\\Classes\\")+MediaProgId,L"Vetro Look Media",
+                  L"Native image viewer and media player");
  ok&=Text(Capabilities,L"ApplicationName",AppName);
- ok&=Text(Capabilities,L"ApplicationDescription",L"Native image viewer for JPEG, PNG, WebP, AVIF and RAW");
+ ok&=Text(Capabilities,L"ApplicationDescription",
+  L"Native viewer for JPEG, PNG, WebP, AVIF and RAW, and player for MP4, MKV and the rest");
  ok&=Text(Capabilities,L"ApplicationIcon",icon);
  ok&=Text(L"Software\\RegisteredApplications",AppName,Capabilities);
  ok&=Text(L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\VetroLook.exe",nullptr,exe);
- for(auto extension:Extensions){
-  ok&=Text(std::wstring(AppKey)+L"\\SupportedTypes",extension,L"");
-  ok&=Text(std::wstring(Capabilities)+L"\\FileAssociations",extension,ProgId);
-  ok&=Empty(std::wstring(L"Software\\Classes\\")+extension+L"\\OpenWithProgids",ProgId);
+ for(auto& association:Associations()){
+  const auto& extension=association.extension;
+  ok&=Text(std::wstring(AppKey)+L"\\SupportedTypes",extension.c_str(),L"");
+  ok&=Text(std::wstring(Capabilities)+L"\\FileAssociations",extension.c_str(),association.progId);
+  ok&=Empty(std::wstring(L"Software\\Classes\\")+extension+L"\\OpenWithProgids",association.progId);
   std::wstring fileExt=std::wstring(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\")+extension;
   // UserChoice is deliberately left alone. Since Windows 8 it is hash-protected
   // and belongs to the user. Publishing capabilities and OpenWith entries is all an app
   // may do; choosing the default stays with the user, via the picker's
   // "Always" button or Settings > Default apps.
-  Empty(fileExt+L"\\OpenWithProgids",ProgId);
+  Empty(fileExt+L"\\OpenWithProgids",association.progId);
   // Append to the per-extension Open with list without disturbing its order.
   HKEY list=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,(fileExt+L"\\OpenWithList").c_str(),0,nullptr,0,KEY_READ|KEY_WRITE,nullptr,&list,nullptr)==ERROR_SUCCESS){
@@ -129,7 +162,7 @@ bool RegisterAsViewer(std::wstring& error){
    RegCloseKey(list);
   }
  }
- ok&=Dword(L"Software\\VetroLook",L"AssociationSchema",3);
+ ok&=Dword(L"Software\\VetroLook",L"AssociationSchema",AssociationSchemaVersion);
  wchar_t runValue[MAX_PATH*2]{};DWORD runBytes=sizeof(runValue);
  if(RegGetValueW(HKEY_CURRENT_USER,RunKey,AppName,RRF_RT_REG_SZ,nullptr,runValue,&runBytes)==ERROR_SUCCESS)
   Text(RunKey,AppName,L"\""+exe+L"\" --background");
@@ -142,6 +175,7 @@ bool RegisterAsViewer(std::wstring& error){
 // the user's UserChoice, settings, or favourites.
 void UnregisterViewer(){
  RegDeleteTreeW(HKEY_CURRENT_USER,(std::wstring(L"Software\\Classes\\")+ProgId).c_str());
+ RegDeleteTreeW(HKEY_CURRENT_USER,(std::wstring(L"Software\\Classes\\")+MediaProgId).c_str());
  RegDeleteTreeW(HKEY_CURRENT_USER,L"Software\\Classes\\Applications\\VetroLook.exe");
  RegDeleteTreeW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Capabilities");
  RegDeleteKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook",L"AssociationSchema");
@@ -151,15 +185,16 @@ void UnregisterViewer(){
  if(RegOpenKeyExW(HKEY_CURRENT_USER,RunKey,0,KEY_SET_VALUE,&runKey)==ERROR_SUCCESS){
   RegDeleteValueW(runKey,AppName);RegCloseKey(runKey);
  }
- for(auto extension:Extensions){
+ for(auto& association:Associations()){
+  const auto& extension=association.extension;
   std::wstring classesKey=std::wstring(L"Software\\Classes\\")+extension;
-  RegDeleteKeyValueW(HKEY_CURRENT_USER,(classesKey+L"\\OpenWithProgids").c_str(),ProgId);
+  RegDeleteKeyValueW(HKEY_CURRENT_USER,(classesKey+L"\\OpenWithProgids").c_str(),association.progId);
   wchar_t currentDefault[256]{};DWORD size=sizeof(currentDefault);
   if(RegGetValueW(HKEY_CURRENT_USER,classesKey.c_str(),nullptr,RRF_RT_REG_SZ,nullptr,currentDefault,&size)==ERROR_SUCCESS&&
-    !_wcsicmp(currentDefault,ProgId))
+    !_wcsicmp(currentDefault,association.progId))
    RegDeleteKeyValueW(HKEY_CURRENT_USER,classesKey.c_str(),nullptr);
   std::wstring fileExt=std::wstring(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\")+extension;
-  RegDeleteKeyValueW(HKEY_CURRENT_USER,(fileExt+L"\\OpenWithProgids").c_str(),ProgId);
+  RegDeleteKeyValueW(HKEY_CURRENT_USER,(fileExt+L"\\OpenWithProgids").c_str(),association.progId);
   HKEY list=nullptr;
   if(RegOpenKeyExW(HKEY_CURRENT_USER,(fileExt+L"\\OpenWithList").c_str(),0,KEY_READ|KEY_WRITE,&list)==ERROR_SUCCESS){
    for(wchar_t letter=L'a';letter<=L'z';letter++){

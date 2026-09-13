@@ -3,6 +3,7 @@
 // redirection surface, so every pixel we present carries its own alpha and the
 // rounded shape of the window is drawn rather than clipped by a region.
 #include "ui.h"
+#include "videomode.h"
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dcomp.h>
@@ -22,6 +23,48 @@ static ComPtr<ID2D1SolidColorBrush> ink;
 static ComPtr<IDCompositionDevice> compositor;
 static ComPtr<IDCompositionTarget> compositionTarget;
 static ComPtr<IDCompositionVisual> visual;
+// The composition tree has two layers. Video sits underneath, because a film is
+// the thing being looked at; the interface layer above it carries its own alpha,
+// so glass, subtitles and chrome are composited by Windows over the video rather
+// than being blended into it by us. With no video open the lower layer holds
+// nothing and costs nothing.
+static ComPtr<IDCompositionVisual> rootVisual,videoVisual;
+static ComPtr<IDCompositionRectangleClip> videoClip;
+// The frosted-glass backdrop: the same film, blurred by the compositor and
+// clipped to each panel. See GfxGlassBegin in ui.h for why it is built this way
+// rather than blurred in Direct2D.
+static ComPtr<IDCompositionDevice3> effectDevice;
+static IUnknown* glassContent=nullptr;   // the film, borrowed from the engine
+static float glassBlurRadius=0;
+static bool glassVisible=false;
+static float videoCornerRadius=0;
+static bool videoContentSet=false;
+// The frosted panels of one frame. Each gets its own visual showing the same
+// film, blurred by the compositor and clipped to that panel's rounded shape:
+// one visual cannot have several holes, and a single visual over the whole
+// window would blur the film itself.
+namespace{
+constexpr int MaxGlassPanels=10;
+struct GlassPanel{D2D1_RECT_F rect{};float radius=0;float opacity=1;};
+ComPtr<IDCompositionVisual> glassPanels[MaxGlassPanels];
+// Opacity lives on the third revision of the visual interface. A panel fades
+// with whatever it holds, so the glass never outlasts the controls on it.
+ComPtr<IDCompositionVisual3> glassPanels3[MaxGlassPanels];
+// One effect chain per panel. A composition effect object drives one visual: a
+// single chain shared by every panel frosted only whichever panel was given it
+// last, which is how the transport turned to clear plastic the moment the
+// subtitle bubble joined the list.
+ComPtr<IDCompositionGaussianBlurEffect> panelBlur[MaxGlassPanels];
+ComPtr<IDCompositionSaturationEffect> panelSaturation[MaxGlassPanels];
+ComPtr<IDCompositionColorMatrixEffect> panelContrast[MaxGlassPanels];
+float panelEffectRadius[MaxGlassPanels]={};
+GlassPanel glassShown[MaxGlassPanels];
+ComPtr<IDCompositionRectangleClip> glassClips[MaxGlassPanels];
+int glassShownCount=0;
+GlassPanel glassPending[MaxGlassPanels];
+int glassPendingCount=0;
+}
+
 static ComPtr<IDWriteFactory> writer;
 static ComPtr<IDWriteTextFormat> faces[F_COUNT];
 static std::map<const wchar_t*,ComPtr<ID2D1PathGeometry>> icons;
@@ -42,8 +85,178 @@ void GfxRebind(){
  HRESULT hr=compositor->CreateVisual(&visual);Trace("rebind-visual",hr);
  if(FAILED(hr))return;
  hr=visual->SetContent(swap.Get());Trace("rebind-content",hr);
- hr=compositionTarget->SetRoot(visual.Get());Trace("rebind-root",hr);
+ // The video layer is rebuilt with the interface layer, not separately: a tree
+ // that lost one of its two children would leave the film on screen with no
+ // controls over it, or controls over nothing.
+ if(!rootVisual)compositor->CreateVisual(&rootVisual);
+ if(!videoVisual)compositor->CreateVisual(&videoVisual);
+ if(rootVisual){
+  rootVisual->RemoveAllVisuals();
+  HRESULT addVideo=videoVisual?rootVisual->AddVisual(videoVisual.Get(),FALSE,nullptr):S_OK;
+  Trace("rebind-add-video",addVideo);
+  // The frosted panels are rebuilt on the next frame that asks for them.
+  glassShownCount=0;
+  for(int i=0;i<MaxGlassPanels;i++){glassPanels[i].Reset();glassPanels3[i].Reset();}
+  HRESULT addUi=rootVisual->AddVisual(visual.Get(),TRUE,videoVisual?videoVisual.Get():nullptr);
+  Trace("rebind-add-ui",addUi);
+  hr=compositionTarget->SetRoot(rootVisual.Get());Trace("rebind-root",hr);
+ }else{
+  hr=compositionTarget->SetRoot(visual.Get());Trace("rebind-root",hr);
+ }
  hr=compositor->Commit();Trace("rebind-commit",hr);
+}
+bool GfxSetVideoContent(IUnknown* content){
+ if(!compositor||!videoVisual)return false;
+ HRESULT hr=videoVisual->SetContent(content);Trace("video-content",hr);
+ if(FAILED(hr))return false;
+ videoContentSet=content!=nullptr;
+ // The frosted panels show the same picture, so they follow the film in and out.
+ glassContent=content;
+ if(!content)GfxClearGlassBackdrop();
+ hr=compositor->Commit();Trace("video-commit",hr);
+ return SUCCEEDED(hr);
+}
+void GfxSetVideoCorners(float radiusPixels){
+ if(!compositor||!videoVisual)return;
+ if(radiusPixels==videoCornerRadius&&(videoClip||radiusPixels<=0))return;
+ videoCornerRadius=radiusPixels;
+ if(radiusPixels<=0){
+  videoVisual->SetClip((IDCompositionClip*)nullptr);
+  videoClip.Reset();
+  compositor->Commit();
+  return;
+ }
+ if(!videoClip&&FAILED(compositor->CreateRectangleClip(&videoClip)))return;
+ videoClip->SetLeft(0.f);videoClip->SetTop(0.f);
+ videoClip->SetRight(float(surfaceW));videoClip->SetBottom(float(surfaceH));
+ videoClip->SetTopLeftRadiusX(radiusPixels);videoClip->SetTopLeftRadiusY(radiusPixels);
+ videoClip->SetTopRightRadiusX(radiusPixels);videoClip->SetTopRightRadiusY(radiusPixels);
+ videoClip->SetBottomLeftRadiusX(radiusPixels);videoClip->SetBottomLeftRadiusY(radiusPixels);
+ videoClip->SetBottomRightRadiusX(radiusPixels);videoClip->SetBottomRightRadiusY(radiusPixels);
+ videoVisual->SetClip(videoClip.Get());
+ compositor->Commit();
+}
+bool GfxHasVideoContent(){return videoContentSet;}
+
+// A device being capable of effects is not evidence that a frosted visual is
+// currently under the control. The painter uses this for its opacity fallback,
+// so report the live composited state rather than just the device capability.
+bool GfxGlassBackdropAvailable(){return glassVisible&&effectDevice!=nullptr;}
+
+// The frosted panels of one frame. Each gets its own visual showing the same
+// film, blurred by the compositor and clipped to that panel's rounded shape:
+// there is no way to give one visual several holes, and a single visual over the
+// whole window would blur the film itself.
+namespace{
+bool SamePanel(const GlassPanel& a,const GlassPanel& b){
+ return fabsf(a.radius-b.radius)<.25f&&fabsf(a.opacity-b.opacity)<.01f&&
+  fabsf(a.rect.left-b.rect.left)<.5f&&fabsf(a.rect.top-b.rect.top)<.5f&&
+  fabsf(a.rect.right-b.rect.right)<.5f&&fabsf(a.rect.bottom-b.rect.bottom)<.5f;
+}
+// This panel's own blur, then a restrained vibrancy lift, then a tiny contrast
+// lift. The dark tint is painted by the panel itself after the chain.
+IDCompositionEffect* PanelEffect(int index,float radius){
+ if(!effectDevice)return nullptr;
+ if(!panelBlur[index]||panelEffectRadius[index]!=radius){
+  panelBlur[index].Reset();panelSaturation[index].Reset();panelContrast[index].Reset();
+  HRESULT hr=effectDevice->CreateGaussianBlurEffect(&panelBlur[index]);Trace("glass-blur",hr);
+  if(FAILED(hr)||!panelBlur[index])return nullptr;
+  // Hard border mode: the blur may sample the film beyond the panel, which is
+  // what stops the edges of the glass going dark.
+  panelBlur[index]->SetBorderMode(D2D1_BORDER_MODE_HARD);
+  panelBlur[index]->SetStandardDeviation(radius);
+  if(SUCCEEDED(effectDevice->CreateSaturationEffect(&panelSaturation[index]))&&panelSaturation[index]){
+   panelSaturation[index]->SetSaturation(1.16f);
+   panelSaturation[index]->SetInput(0,panelBlur[index].Get(),0);
+  }else panelSaturation[index].Reset();
+  if(SUCCEEDED(effectDevice->CreateColorMatrixEffect(&panelContrast[index]))&&panelContrast[index]){
+   constexpr float contrast=1.05f,midpoint=(1.f-contrast)*.5f;
+   D2D1_MATRIX_5X4_F matrix={
+    contrast,0,0,0,
+    0,contrast,0,0,
+    0,0,contrast,0,
+    0,0,0,1,
+    midpoint,midpoint,midpoint,0,
+   };
+   panelContrast[index]->SetMatrix(matrix);
+   panelContrast[index]->SetInput(0,panelSaturation[index]?static_cast<IUnknown*>(panelSaturation[index].Get()):static_cast<IUnknown*>(panelBlur[index].Get()),0);
+  }else panelContrast[index].Reset();
+  panelEffectRadius[index]=radius;
+ }
+ if(panelContrast[index])return panelContrast[index].Get();
+ if(panelSaturation[index])return panelSaturation[index].Get();
+ return panelBlur[index].Get();
+}
+void ApplyPanel(int index,const GlassPanel& panel,float blurRadius){
+ if(!glassPanels[index]){
+  if(FAILED(compositor->CreateVisual(&glassPanels[index])))return;
+  glassPanels[index].As(&glassPanels3[index]);
+  if(rootVisual&&videoVisual)
+   rootVisual->AddVisual(glassPanels[index].Get(),TRUE,videoVisual.Get());
+ }
+ auto& visualRef=glassPanels[index];
+ visualRef->SetContent(videoContentSet?glassContent:nullptr);
+ if(auto effect=PanelEffect(index,blurRadius))visualRef->SetEffect(effect);
+ if(glassPanels3[index])glassPanels3[index]->SetOpacity(panel.opacity<0?0:(panel.opacity>1?1:panel.opacity));
+ if(!glassClips[index]&&FAILED(compositor->CreateRectangleClip(&glassClips[index])))return;
+ auto& clip=glassClips[index];
+ clip->SetLeft(panel.rect.left);clip->SetTop(panel.rect.top);
+ clip->SetRight(panel.rect.right);clip->SetBottom(panel.rect.bottom);
+ clip->SetTopLeftRadiusX(panel.radius);clip->SetTopLeftRadiusY(panel.radius);
+ clip->SetTopRightRadiusX(panel.radius);clip->SetTopRightRadiusY(panel.radius);
+ clip->SetBottomLeftRadiusX(panel.radius);clip->SetBottomLeftRadiusY(panel.radius);
+ clip->SetBottomRightRadiusX(panel.radius);clip->SetBottomRightRadiusY(panel.radius);
+ visualRef->SetClip(clip.Get());
+}
+void HidePanel(int index){
+ if(!glassPanels[index])return;
+ glassPanels[index]->SetContent(nullptr);
+ glassPanels[index]->SetEffect(nullptr);
+ glassPanels[index]->SetClip((IDCompositionClip*)nullptr);
+}
+}
+
+
+void GfxGlassBegin(){glassPendingCount=0;}
+void GfxGlassAdd(const D2D1_RECT_F& rect,float radius,float opacity){
+ if(glassPendingCount>=MaxGlassPanels)return;
+ if(rect.right<=rect.left||rect.bottom<=rect.top||opacity<=.004f)return;
+ glassPending[glassPendingCount++]={rect,radius,opacity};
+}
+void GfxGlassCommit(float dpi,float blurRadiusPixels){
+ if(!compositor||!videoContentSet||!effectDevice){GfxClearGlassBackdrop();return;}
+ bool radiusChanged=blurRadiusPixels!=glassBlurRadius;
+ glassBlurRadius=blurRadiusPixels;
+ GlassPanel wanted[MaxGlassPanels];
+ for(int i=0;i<glassPendingCount;i++){
+  wanted[i].radius=glassPending[i].radius*dpi;
+  wanted[i].opacity=glassPending[i].opacity;
+  wanted[i].rect=D2D1::RectF(glassPending[i].rect.left*dpi,glassPending[i].rect.top*dpi,
+                             glassPending[i].rect.right*dpi,glassPending[i].rect.bottom*dpi);
+ }
+ // Only what moved is touched: a fading panel changes its opacity every frame,
+ // and the panels beside it have no reason to be rebuilt for that.
+ bool committed=false;
+ for(int i=0;i<glassPendingCount;i++){
+  if(radiusChanged||i>=glassShownCount||!SamePanel(wanted[i],glassShown[i])){
+   ApplyPanel(i,wanted[i],blurRadiusPixels);
+   glassShown[i]=wanted[i];
+   committed=true;
+  }
+ }
+ if(glassShownCount!=glassPendingCount){
+  for(int i=glassPendingCount;i<MaxGlassPanels;i++)HidePanel(i);
+  committed=true;
+ }
+ glassShownCount=glassPendingCount;
+ glassVisible=glassPendingCount>0;
+ if(committed)compositor->Commit();
+}
+void GfxClearGlassBackdrop(){
+ if(!compositor||glassShownCount==0)return;
+ for(int i=0;i<MaxGlassPanels;i++)HidePanel(i);
+ glassShownCount=0;glassPendingCount=0;glassVisible=false;
+ compositor->Commit();
 }
 ID2D1DeviceContext* Dc(){return dc.Get();}
 ID2D1SolidColorBrush* Ink(){return ink.Get();}
@@ -56,6 +269,7 @@ static void MakeFonts(){
  struct Spec{Face face;float size;DWRITE_FONT_WEIGHT weight;DWRITE_TEXT_ALIGNMENT align;};
  const Spec specs[]={
   {F_Title,15.5f,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_CENTER},
+  {F_VideoTitle,19.f,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_CENTER},
   {F_Meta,11.5f,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_CENTER},
   {F_Row,13.5f,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_LEADING},
   {F_Label,12.f,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_TEXT_ALIGNMENT_LEADING},
@@ -66,6 +280,9 @@ static void MakeFonts(){
   {F_Small,10.5f,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_CENTER},
   {F_Mono,11.f,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_LEADING},
   {F_Timeline,18.f,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_LEADING},
+  // Subtitles are read at a glance from across a room, so they are the largest
+  // type in the application and the only face that wraps.
+  {F_Subtitle,23.f,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_CENTER},
  };
  for(auto& s:specs){
   writer->CreateTextFormat(s.face==F_Mono?L"Consolas":L"Segoe UI Variable",nullptr,s.weight,
@@ -73,7 +290,7 @@ static void MakeFonts(){
   if(!faces[s.face])writer->CreateTextFormat(L"Segoe UI",nullptr,s.weight,DWRITE_FONT_STYLE_NORMAL,
    DWRITE_FONT_STRETCH_NORMAL,s.size,L"en-us",&faces[s.face]);
   if(faces[s.face]){faces[s.face]->SetTextAlignment(s.align);faces[s.face]->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-   faces[s.face]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);}
+   faces[s.face]->SetWordWrapping(s.face==F_Subtitle?DWRITE_WORD_WRAPPING_WRAP:DWRITE_WORD_WRAPPING_NO_WRAP);}
  }
 }
 IDWriteTextFormat* Font(Face f){return faces[f].Get();}
@@ -143,10 +360,39 @@ bool GfxCreate(HWND window,float dpi){
  desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;desc.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
  desc.Scaling=DXGI_SCALING_STRETCH;
  if(FAILED(dxgiFactory->CreateSwapChainForComposition(d3d.Get(),&desc,nullptr,&swap)))return false;
- if(FAILED(DCompositionCreateDevice(dxgi.Get(),IID_PPV_ARGS(&compositor))))return false;
+ // DCompositionCreateDevice returns the original factory interface only. It
+ // cannot be queried for IDCompositionDevice3 on this machine, so the video
+ // glass silently took its tint-only fallback. Create through the newer entry
+ // point first, then retain the base interface for the ordinary visual tree.
+ HRESULT compositionHr=DCompositionCreateDevice3(dxgi.Get(),__uuidof(IDCompositionDevice),
+                                                  reinterpret_cast<void**>(compositor.GetAddressOf()));
+ Trace("composition-device3",compositionHr);
+ if(FAILED(compositionHr)){
+  compositionHr=DCompositionCreateDevice(dxgi.Get(),IID_PPV_ARGS(&compositor));
+  Trace("composition-device",compositionHr);
+ }
+ if(FAILED(compositionHr))return false;
  if(FAILED(compositor->CreateTargetForHwnd(window,TRUE,&compositionTarget)))return false;
  if(FAILED(compositor->CreateVisual(&visual)))return false;
- visual->SetContent(swap.Get());compositionTarget->SetRoot(visual.Get());compositor->Commit();
+ if(FAILED(compositor->CreateVisual(&videoVisual)))return false;
+ if(FAILED(compositor->CreateVisual(&rootVisual)))return false;
+ // Filter effects live on the newer device interface. Where they are missing --
+ // an older Windows, a compositor that declines -- the glass falls back to a
+ // plain tint, which is a weaker look but never a broken one.
+ HRESULT effectsHr=compositor.As(&effectDevice);Trace("composition-effects",effectsHr);
+ visual->SetContent(swap.Get());
+ // Order is stated against a reference rather than against the list, because
+ // "top of an empty list" is the one thing worth not guessing about: the
+ // interface has to be above the film, or the controls are behind the picture.
+ // Film at the bottom, frosted panels above it as they are needed, interface on
+ // top. The panels insert themselves directly above the film when they appear.
+ // Order is stated against the film rather than against the list: "above
+ // nothing" is the one thing worth not guessing about, and it is not the top.
+ // Frosted panels insert themselves above the film later, which puts them
+ // between the film and the interface, exactly where glass belongs.
+ rootVisual->AddVisual(videoVisual.Get(),FALSE,nullptr);
+ rootVisual->AddVisual(visual.Get(),TRUE,videoVisual.Get());
+ compositionTarget->SetRoot(rootVisual.Get());compositor->Commit();
  return MakeTargets(desc.Width,desc.Height,dpi);
 }
 void GfxResize(UINT w,UINT h,float dpi){
@@ -156,15 +402,40 @@ void GfxResize(UINT w,UINT h,float dpi){
  ReleaseTargets();
  HRESULT hr=swap->ResizeBuffers(0,w,h,DXGI_FORMAT_UNKNOWN,0);Trace("ResizeBuffers",hr);if(FAILED(hr))return;
  MakeTargets(w,h,dpi);
+ if(videoClip){
+  videoClip->SetRight(float(w));videoClip->SetBottom(float(h));
+  if(compositor)compositor->Commit();
+ }
 }
 void GfxDestroy(){
  ReleaseTargets();ink.Reset();icons.clear();
+ if(videoVisual)videoVisual->SetContent(nullptr);
+ for(int i=0;i<MaxGlassPanels;i++){
+  if(glassPanels[i]){glassPanels[i]->SetEffect(nullptr);glassPanels[i]->SetContent(nullptr);}
+  glassPanels[i].Reset();glassPanels3[i].Reset();glassClips[i].Reset();
+  panelContrast[i].Reset();panelSaturation[i].Reset();panelBlur[i].Reset();panelEffectRadius[i]=0;
+ }
+ glassContent=nullptr;glassShownCount=0;glassPendingCount=0;
+ videoContentSet=false;glassVisible=false;glassBlurRadius=0;
+ effectDevice.Reset();
+ videoClip.Reset();videoVisual.Reset();rootVisual.Reset();
  visual.Reset();compositionTarget.Reset();compositor.Reset();swap.Reset();dc.Reset();device.Reset();factory.Reset();d3d.Reset();
  for(auto& f:faces)f.Reset();writer.Reset();
 }
 
+// Appendix F.3 asks for measured values rather than utilisation: the time from
+// the first draw of a frame to that frame being ready to present. The vsync wait
+// inside Present is not part of it -- waiting is not work -- so the clock stops
+// before Present is called.
+static LARGE_INTEGER renderBegan{},renderFreq{};
+static double renderMs=0;
+double GfxLastRenderMs(){return renderMs;}
+struct ID3D11Device* GfxD3DDevice(){return d3d.Get();}
+
 void GfxBeginScene(float,float){
  if(!GfxReady())return;
+ if(!renderFreq.QuadPart)QueryPerformanceFrequency(&renderFreq);
+ QueryPerformanceCounter(&renderBegan);
  dc->SetTarget(scene.Get());dc->BeginDraw();dc->SetTransform(D2D1::Matrix3x2F::Identity());
  dc->Clear(D2D1::ColorF(0,0,0,0));drawing=true;
 }
@@ -190,6 +461,11 @@ void GfxEndScene(const D2D1_ROUNDED_RECT& shape,bool needGlass){
 void GfxPresent(bool vsync){
  if(!GfxReady())return;
  if(drawing){HRESULT hr=dc->EndDraw();if(FAILED(hr))Trace("EndDraw",hr);drawing=false;}
+ if(renderBegan.QuadPart&&renderFreq.QuadPart){
+  LARGE_INTEGER ready{};QueryPerformanceCounter(&ready);
+  renderMs=double(ready.QuadPart-renderBegan.QuadPart)*1000.0/double(renderFreq.QuadPart);
+  renderBegan.QuadPart=0;
+ }
  HRESULT present=swap->Present(vsync?1:0,0);if(FAILED(present))Trace("Present",present);
  if(compositor)compositor->Commit();
 }
@@ -211,6 +487,14 @@ void SoftShadow(const D2D1_ROUNDED_RECT& rr,float opacity,float spread){
 }
 void Glass(const D2D1_ROUNDED_RECT& rr,const Palette& p,float opacity,const D2D1_MATRIX_3X2_F& world){
  if(!GfxReady()||opacity<=.004f)return;
+ // The live video sits in a separate DirectComposition visual, so ordinary
+ // Direct2D frosting cannot sample it. Its blur is supplied by the compositor;
+ // draw exactly the same dense matte layers as the transport above that blur.
+ if(GfxHasVideoContent()){
+  SoftShadow(rr,.25f*opacity,1.35f);
+  VideoModePaintMatteSurface(rr,opacity);
+  return;
+ }
  SoftShadow(rr,opacity);
  if(frostValid){auto b=GlassSource(world);if(b){b->SetOpacity(opacity);dc->FillRoundedRectangle(rr,b);}}
  ink->SetColor(Fade(p.glass,opacity));dc->FillRoundedRectangle(rr,ink.Get());
@@ -229,14 +513,27 @@ float Measure(const std::wstring& s,Face f,float maxWidth){
  DWRITE_TEXT_METRICS m{};layout->GetMetrics(&m);return m.widthIncludingTrailingWhitespace;
 }
 
-// A miniature absolute-coordinate path reader: M, L, C, Q and Z over a 24x24 box.
+void MeasureBlock(const std::wstring& s,Face f,float maxWidth,float& width,float& height){
+ width=height=0;
+ if(s.empty()||!faces[f]||!writer)return;
+ ComPtr<IDWriteTextLayout> layout;
+ if(FAILED(writer->CreateTextLayout(s.c_str(),UINT32(s.size()),faces[f].Get(),maxWidth,4096.f,&layout)))return;
+ DWRITE_TEXT_METRICS metrics{};
+ if(FAILED(layout->GetMetrics(&metrics)))return;
+ width=metrics.widthIncludingTrailingWhitespace;
+ height=metrics.height;
+}
+
+// Compact SVG path reader. The app's own icons are 24x24; the video transport
+// also consumes Phosphor's official 256-unit SVG paths, including relative
+// commands and arcs, without a runtime SVG dependency.
 static ComPtr<ID2D1PathGeometry> BuildPath(const wchar_t* d){
  ComPtr<ID2D1PathGeometry> geometry;
  if(!factory||FAILED(factory->CreatePathGeometry(&geometry)))return geometry;
  ComPtr<ID2D1GeometrySink> sink;
  if(FAILED(geometry->Open(&sink))){geometry.Reset();return geometry;}
  sink->SetFillMode(D2D1_FILL_MODE_WINDING);
- const wchar_t* p=d;wchar_t command=0;bool open=false;D2D1_POINT_2F at{};
+ const wchar_t* p=d;wchar_t command=0;bool open=false;D2D1_POINT_2F at{},start{};
  auto number=[&](float& out)->bool{
   while(*p==L' '||*p==L',')p++;
   if(!*p||(!iswdigit(*p)&&*p!=L'-'&&*p!=L'.'))return false;
@@ -246,22 +543,36 @@ static ComPtr<ID2D1PathGeometry> BuildPath(const wchar_t* d){
   while(*p==L' '||*p==L',')p++;
   if(!*p)break;
   if(iswalpha(*p))command=*p++;
-  if(command==L'Z'){if(open){sink->EndFigure(D2D1_FIGURE_END_CLOSED);open=false;}continue;}
+  bool relative=iswlower(command);wchar_t op=towupper(command);
+  if(op==L'Z'){if(open){sink->EndFigure(D2D1_FIGURE_END_CLOSED);open=false;at=start;}continue;}
   float a=0,b=0,c=0,e=0,f=0,g=0;
-  if(command==L'M'){
+  auto point=[&](float x,float y){return D2D1::Point2F(relative?at.x+x:x,relative?at.y+y:y);};
+  if(op==L'M'){
    if(!number(a)||!number(b))break;
    if(open)sink->EndFigure(D2D1_FIGURE_END_OPEN);
-   at=D2D1::Point2F(a,b);sink->BeginFigure(at,D2D1_FIGURE_BEGIN_FILLED);open=true;command=L'L';continue;
+   at=point(a,b);start=at;sink->BeginFigure(at,D2D1_FIGURE_BEGIN_FILLED);open=true;command=relative?L'l':L'L';continue;
   }
   if(!open){sink->BeginFigure(at,D2D1_FIGURE_BEGIN_FILLED);open=true;}
-  if(command==L'L'){if(!number(a)||!number(b))break;at=D2D1::Point2F(a,b);sink->AddLine(at);}
-  else if(command==L'C'){
+  if(op==L'L'){if(!number(a)||!number(b))break;at=point(a,b);sink->AddLine(at);}
+  else if(op==L'H'){if(!number(a))break;at.x=relative?at.x+a:a;sink->AddLine(at);}
+  else if(op==L'V'){if(!number(a))break;at.y=relative?at.y+a:a;sink->AddLine(at);}
+  else if(op==L'C'){
    if(!number(a)||!number(b)||!number(c)||!number(e)||!number(f)||!number(g))break;
-   sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(a,b),D2D1::Point2F(c,e),D2D1::Point2F(f,g)));at=D2D1::Point2F(f,g);
+   auto p1=point(a,b),p2=point(c,e),p3=point(f,g);
+   sink->AddBezier(D2D1::BezierSegment(p1,p2,p3));at=p3;
   }
-  else if(command==L'Q'){
+  else if(op==L'Q'){
    if(!number(a)||!number(b)||!number(c)||!number(e))break;
-   sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(a,b),D2D1::Point2F(c,e)));at=D2D1::Point2F(c,e);
+   auto p1=point(a,b),p2=point(c,e);sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(p1,p2));at=p2;
+  }
+  else if(op==L'A'){
+   float rotation=0,large=0,sweep=0;
+   if(!number(a)||!number(b)||!number(rotation)||!number(large)||!number(sweep)||!number(c)||!number(e))break;
+   auto end=point(c,e);
+   D2D1_ARC_SEGMENT arc={end,D2D1::SizeF(fabsf(a),fabsf(b)),rotation,
+                         sweep>.5f?D2D1_SWEEP_DIRECTION_CLOCKWISE:D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                         large>.5f?D2D1_ARC_SIZE_LARGE:D2D1_ARC_SIZE_SMALL};
+   sink->AddArc(arc);at=end;
   }
   else break;
  }
@@ -269,22 +580,28 @@ static ComPtr<ID2D1PathGeometry> BuildPath(const wchar_t* d){
  if(FAILED(sink->Close()))geometry.Reset();
  return geometry;
 }
-void Icon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke,bool fill,float rotation){
+static void DrawIcon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke,bool fill,float rotation,float viewBox){
  if(!path||!GfxReady()||colour.a<=.004f)return;
  auto found=icons.find(path);
  if(found==icons.end())found=icons.emplace(path,BuildPath(path)).first;
  if(!found->second)return;
- float side=(std::min)(box.right-box.left,box.bottom-box.top),scale=side/24.f;
+ float side=(std::min)(box.right-box.left,box.bottom-box.top),scale=side/viewBox;
  if(scale<=0)return;
  float cx=(box.left+box.right)/2,cy=(box.top+box.bottom)/2;
  D2D1_MATRIX_3X2_F previous;dc->GetTransform(&previous);
- auto local=D2D1::Matrix3x2F::Translation(-12,-12)*D2D1::Matrix3x2F::Rotation(rotation)*
+ auto local=D2D1::Matrix3x2F::Translation(-viewBox/2,-viewBox/2)*D2D1::Matrix3x2F::Rotation(rotation)*
   D2D1::Matrix3x2F::Scale(scale,scale)*D2D1::Matrix3x2F::Translation(cx,cy);
  dc->SetTransform(local*Mat(previous));
  ink->SetColor(colour);
  if(fill)dc->FillGeometry(found->second.Get(),ink.Get());
  else dc->DrawGeometry(found->second.Get(),ink.Get(),stroke/scale);
  dc->SetTransform(previous);
+}
+void Icon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke,bool fill,float rotation){
+ DrawIcon(path,box,colour,stroke,fill,rotation,24.f);
+}
+void PhosphorIcon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke,bool fill,float rotation){
+ DrawIcon(path,box,colour,stroke,fill,rotation,256.f);
 }
 
 std::shared_ptr<Image> Rasterise(const Image& base,const std::function<void(ID2D1DeviceContext*)>& draw){

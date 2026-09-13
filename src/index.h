@@ -47,6 +47,12 @@ void IndexDrivesChanged();
 // an empty grid until the wider scan happens to reach that folder.
 void IndexTouchFolder(const std::wstring& folder);
 
+// Held by the Resource Governor while the machine has no room for a library
+// walk (§12.4, step 10). The scanner stops between folders rather than mid-file,
+// so pausing never leaves a folder half recorded.
+void IndexSetPaused(bool paused);
+bool IndexPaused();
+
 bool IndexIsScanning();
 uint64_t IndexKnownPhotoCount();
 

@@ -39,6 +39,8 @@
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="2A9F1E3B-6C4D-4A8E-9B2F-7D3C5E1A8F60">
         <File Id="VetroLookEXE" Source="$(ExePath)" KeyPath="yes" />
+        <!-- The playback engine, loaded by name from beside the executable. -->
+        <File Id="LibMpv" Source="$(MpvPath)" />
         <File Id="ReleaseReadme" Source="$(ReadmePath)" />
         <File Id="ThirdPartyNotices" Source="$(NoticesPath)" />
       </Component>
@@ -77,7 +79,7 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Image\Application" Name="ApplicationIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
 
         <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationName" Value="Vetro Look" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationDescription" Value="Native image viewer for JPEG, PNG, WebP, AVIF and RAW" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationDescription" Value="Native image and video viewer" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities" Name="ApplicationIcon" Value="&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="Vetro Look" Value="Software\VetroLook\Capabilities" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\VetroLook.exe" Value="[INSTALLFOLDER]VetroLook.exe" Type="string" />
@@ -174,8 +176,10 @@
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="LensfunDatabase" />
       <ComponentRef Id="FileAssociationRegistry" />
+      <ComponentRef Id="MediaAssociations" />
       <ComponentRef Id="ApplicationShortcut" />
     </Feature>
   </Package>
   <?include VetroLook.lensfun.wxi?>
+  <?include VetroLook.media.wxi?>
 </Wix>

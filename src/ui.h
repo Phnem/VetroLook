@@ -85,6 +85,33 @@ enum Str{
  S_Author,S_Copyright,S_Keywords,S_Title,S_Description,S_Software,
  S_LensProfile,S_ProfileFound,S_ProfileMissing,S_Distortion,S_Vignette,S_Chromatic,
  S_LensCorrection,S_Auto,S_MatchedCamera,S_MatchedLens,
+ // Playback quality: the two choices of §11.3 and §74, and the diagnostics
+ // block they are explained in.
+ S_SyncLabel,S_SyncAuto,S_SyncSmooth,S_SyncLatency,
+ S_PowerLabel,S_PowerAuto,S_PowerPerformance,S_PowerEfficiency,
+ S_Diagnostics,S_DiagnosticsCopied,
+ // The timeline's preview card, and the seek step it commits.
+ S_PreviewWorking,S_PreviewUnavailable,S_SeekStep,
+ // What a film remembers, and the things it can be told during playback.
+ S_Resumed,S_Chapter,S_NoChapters,S_SubtitleDelay,S_AudioDelay,S_DelayNone,
+ S_FrameSaved,S_LoopFrom,S_LoopSet,S_LoopOff,S_Connecting,S_NoAddress,
+ // Streams: what is happening, and why one did not play, in a sentence (9.2, 75).
+ S_ReadingPage,S_Live,S_Reconnecting,S_WaitingNetwork,S_Reconnected,S_StreamDrm,
+ S_NoPublicStream,S_NoResolver,S_StreamNotFound,S_StreamForbidden,S_StreamCertificate,
+ S_SignIn,S_StreamFailed,S_LiveEdge,
+ // AI subtitles, the model that makes them, and silence skip (27, 28, 75).
+ S_AiSubtitles,S_AiOn,S_AiOff,S_AiNeedsModel,S_AiUnavailable,S_AiExported,S_AiNothingToExport,
+ S_AiModel,S_AiDownload,S_AiRemove,S_AiRemoved,S_AiDownloading,S_AiReady,S_AiDownloadFailed,
+ S_AiLanguage,S_AiLanguageAuto,S_AiLanguageRu,S_AiLanguageEn,
+ S_SilenceSkip,S_SkipOff,S_SkipGentle,S_SkipAggressive,
+ // Video enhancement (17.2).
+ S_Enhancement,S_EnhanceOff,S_EnhanceAuto,S_EnhanceOn,S_EnhancementReduced,
+ // Release hardening: session restore and picture-in-picture pinning (43, 33).
+ S_SessionRestored,S_PipPinned,S_PipUnpinned,
+ // Video Mode's compact cards. Kept in the shared table so the transport does
+ // not quietly switch language while the rest of Vetro Look stays localised.
+ S_PlaybackSpeed,S_StreamList,S_PlaybackRate,S_DefaultStream,S_LoadingStreams,
+ S_AudioTrack,S_SubtitleTrack,
  S_COUNT
 };
 extern int language;               // 0 Russian, 1 English
@@ -97,12 +124,58 @@ void  GfxDestroy();
 bool  GfxReady();
 ID2D1DeviceContext* Dc();
 ID2D1Factory1* GfxFactory();
+// The Direct3D device behind everything. Asked for by the capability probe,
+// which needs the adapter and its decode profiles, and by the memory budget,
+// which needs the adapter's video-memory budget. Null before GfxCreate.
+struct ID3D11Device* GfxD3DDevice();
+// How long the last frame took from the first draw to being ready to present,
+// in milliseconds -- the deadline measurement of Appendix F.3. The wait for
+// vertical blank is deliberately outside it: that is not work we did.
+double GfxLastRenderMs();
 void GfxRebind();
 ID2D1StrokeStyle* DashStyle();
 ID2D1SolidColorBrush* Ink();          // scratch solid brush
 void  GfxBeginScene(float w,float h);
 void  GfxEndScene(const D2D1_ROUNDED_RECT& windowShape,bool needGlass);
 void  GfxPresent(bool vsync);
+// ------------------------------------------------------- video presentation --
+// The seam between the shell and a playback engine. The shell owns the window
+// and the composition tree; the engine owns whatever it renders into. The only
+// thing that crosses is an opaque piece of content -- a swapchain the engine
+// created -- which is placed underneath the interface layer, clipped to the
+// window's own rounded shape.
+//
+// No engine type appears here on purpose: what hands over the content may be
+// libmpv today and something else later, and neither the window nor the
+// interface should be able to tell.
+bool  GfxSetVideoContent(IUnknown* content);
+// The window's corner radius in device pixels, so the film has the same shape
+// as the window it plays in. Zero squares the corners, for a maximised window.
+void  GfxSetVideoCorners(float radiusPixels);
+bool  GfxHasVideoContent();
+// Frosted glass over the film.
+//
+// Glass in this application is a blur of whatever is behind it. Behind the
+// interface layer is a swapchain the playback engine owns, which Direct2D cannot
+// read -- so the blur is done where the picture actually is: a second visual
+// showing the same swapchain, clipped to the panel, with a Gaussian blur applied
+// by the compositor, sitting between the film and the interface. The interface
+// then paints only the tint, the edge and the content over it.
+//
+// `rect` and `radius` are in device pixels. An empty rect takes the backdrop
+// away. The call is cheap to repeat with the same geometry: it commits only when
+// something moved.
+// One frame's worth of frosted panels: begin, add each panel where the interface
+// is about to draw glass, commit. Panels are in DIPs; the compositor is told
+// about them in device pixels. Committing the same set twice in a row costs
+// nothing, which is what lets this be called every frame.
+void  GfxGlassBegin();
+// `opacity` fades the glass with what is painted on it, so a panel on its way out
+// never leaves an empty pane of frosted glass behind its own contents.
+void  GfxGlassAdd(const D2D1_RECT_F& rect,float radius,float opacity=1.f);
+void  GfxGlassCommit(float dpi,float blurRadiusPixels);
+void  GfxClearGlassBackdrop();
+bool  GfxGlassBackdropAvailable();
 ID2D1BitmapBrush* GlassSource(const D2D1_MATRIX_3X2_F& world);
 void  Glass(const D2D1_ROUNDED_RECT& rr,const Palette& p,float opacity,const D2D1_MATRIX_3X2_F& world);
 void  SoftShadow(const D2D1_ROUNDED_RECT& rr,float opacity,float spread=1.f);
@@ -113,17 +186,26 @@ void  DrawClipping(ID2D1Bitmap* source,bool high,float opacity);
 std::shared_ptr<Image> Rasterise(const Image& base,const std::function<void(ID2D1DeviceContext*)>& draw);
 
 // Text formats, created once.
-enum Face{F_Title,F_Meta,F_Row,F_Label,F_Value,F_Section,F_Button,F_Big,F_Small,F_Mono,F_Timeline,F_COUNT};
+enum Face{F_Title,F_VideoTitle,F_Meta,F_Row,F_Label,F_Value,F_Section,F_Button,F_Big,F_Small,F_Mono,F_Timeline,
+          F_Subtitle,F_COUNT};
 IDWriteTextFormat* Font(Face f);
 void  Write(const std::wstring& s,D2D1_RECT_F r,Face f,D2D1_COLOR_F colour);
 float Measure(const std::wstring& s,Face f,float maxWidth);
+// Width and height of `s` laid out into `maxWidth`, wrapping where the face
+// allows it. Subtitles are the one place in this interface where the text
+// decides the size of what is drawn around it.
+void MeasureBlock(const std::wstring& s,Face f,float maxWidth,float& width,float& height);
 
 // Icons are 24x24 path data, cached as geometry and stroked or filled.
 void  Icon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke=1.7f,bool fill=false,float rotation=0);
+// Phosphor's official SVG assets use the native 256-unit viewbox. Keeping that
+// scale explicit lets the video transport use the source vectors verbatim.
+void  PhosphorIcon(const wchar_t* path,D2D1_RECT_F box,D2D1_COLOR_F colour,float stroke=1.7f,bool fill=true,float rotation=0);
 extern const wchar_t *IcBack,*IcMinus,*IcPlus,*IcInfo,*IcCopy,*IcCheck,*IcHeart,*IcRotate,*IcExpand,*IcCompress,
  *IcDots,*IcMin,*IcMax,*IcRestore,*IcClose,*IcShare,*IcSave,*IcSaveAs,*IcPrint,*IcTrash,*IcMoon,*IcSun,*IcGlobe,
  *IcCrop,*IcPen,*IcArrow,*IcMarquee,*IcChevron,*IcChevronL,*IcDefault,*IcSpace,*IcMouse,
- *IcSearch,*IcSortLines,*IcFilter,*IcFolderIc,*IcGridPhoto,*IcCheckbox;
+ *IcSearch,*IcSortLines,*IcFilter,*IcFolderIc,*IcGridPhoto,*IcCheckbox,
+ *IcPlay,*IcPause,*IcVolume,*IcMuted,*IcRewind,*IcForward,*IcSettings,*IcTracks;
 
 // ------------------------------------------------------------- metadata ----
 struct Field{std::wstring label,value;};

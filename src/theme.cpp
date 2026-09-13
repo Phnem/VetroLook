@@ -243,6 +243,86 @@ static const Phrase phrases[]={
  {L"Авто",L"Auto"},
  {L"Камера",L"Camera"},
  {L"Объектив",L"Lens"},
+
+ // Playback quality. Three words each, because these rows sit in a side panel
+ // and a sentence there would wrap into the value column.
+ {L"Синхронизация",L"Synchronization"},
+ {L"Авто",L"Auto"},
+ {L"Плавность",L"Smoothness"},
+ {L"Задержка",L"Low latency"},
+ {L"Питание",L"Power"},
+ {L"Авто",L"Auto"},
+ {L"Производительность",L"Performance"},
+ {L"Экономия",L"Efficiency"},
+ {L"Диагностика",L"Diagnostics"},
+ {L"Диагностика скопирована",L"Diagnostics copied"},
+ {L"Кадр…",L"Frame…"},
+ {L"Нет кадра",L"No preview"},
+ {L"Шаг перемотки",L"Seek step"},
+ {L"Продолжаем с",L"Resumed at"},
+ {L"Глава",L"Chapter"},
+ {L"Глав нет",L"No chapters"},
+ {L"Субтитры",L"Subtitle delay"},
+ {L"Звук",L"Audio delay"},
+ {L"без смещения",L"none"},
+ {L"Кадр сохранён",L"Frame saved"},
+ {L"Начало отрезка",L"Loop start"},
+ {L"Отрезок повторяется",L"Looping"},
+ {L"Повтор выключен",L"Loop off"},
+ {L"Соединение…",L"Connecting…"},
+ {L"В буфере нет адреса",L"No address on the clipboard"},
+ {L"Читаю страницу…",L"Reading the page…"},
+ {L"● В ЭФИРЕ",L"● LIVE"},
+ {L"Поток прервался. Переподключаюсь…",L"The stream disconnected. Reconnecting…"},
+ {L"Жду сеть…",L"Waiting for network…"},
+ {L"Поток восстановлен",L"Stream restored"},
+ {L"Этот источник защищён DRM и не может играть в Vetro Look.",L"This source requires DRM and cannot be played in Vetro Look."},
+ {L"На этой странице не нашлось открытого потока.",L"Vetro Look couldn't find a playable public stream on this page."},
+ {L"Для ссылок на страницы нужен yt-dlp.exe в папке resolver",L"Page links need yt-dlp.exe in the resolver folder"},
+ {L"Этого адреса больше нет.",L"This address no longer exists."},
+ {L"Сервер не пускает к этому потоку.",L"The server refused access to this stream."},
+ {L"Сертификат сервера не прошёл проверку.",L"The server's certificate could not be verified."},
+ {L"Это видео доступно только после входа.",L"This video needs a signed-in account."},
+ {L"Поток не открылся.",L"The stream could not be opened."},
+ {L"К прямому эфиру",L"Back to live"},
+ {L"AI-субтитры",L"AI subtitles"},
+ {L"AI-субтитры включены",L"AI subtitles on"},
+ {L"AI-субтитры выключены",L"AI subtitles off"},
+ {L"AI-субтитры нужно один раз скачать в меню «…» (≈1.2 ГБ)",L"Download AI subtitles once from the … menu (≈1.2 GB)"},
+ {L"AI-субтитры доступны для фильмов на этом компьютере",L"AI subtitles are available for films on this computer"},
+ {L"Субтитры сохранены рядом с фильмом",L"Subtitles saved beside the film"},
+ {L"Пока нечего сохранять",L"Nothing generated yet"},
+ {L"AI-субтитры",L"AI subtitles"},
+ {L"Скачать",L"Download"},
+ {L"Удалить",L"Remove"},
+ {L"AI-субтитры удалены",L"AI subtitles removed"},
+ {L"Скачиваются AI-субтитры…",L"Downloading AI subtitles…"},
+ {L"AI-субтитры готовы",L"AI subtitles are ready"},
+ {L"AI-субтитры не скачались",L"AI subtitles could not be downloaded"},
+ {L"Язык AI-субтитров",L"AI subtitle language"},
+ {L"Авто",L"Auto"},
+ {L"Русский",L"Russian"},
+ {L"English",L"English"},
+ {L"Пропуск тишины",L"Skip silence"},
+ {L"Выкл",L"Off"},
+ {L"Мягко",L"Gentle"},
+ {L"Сильно",L"Aggressive"},
+ {L"Улучшение видео",L"Video enhancement"},
+ {L"Выкл",L"Off"},
+ {L"Авто",L"Auto"},
+ {L"Вкл",L"On"},
+ {L"Улучшение видео временно снижено, чтобы фильм шёл плавно",L"Video enhancement was temporarily reduced to keep playback smooth"},
+ {L"Фильм восстановлен после неожиданного закрытия",L"Restored after an unexpected exit"},
+ {L"Поверх всех окон",L"Pinned on top"},
+ {L"Не поверх окон",L"Not pinned"},
+
+ {L"Скорость",L"Speed"},
+ {L"Дорожки",L"Streams"},
+ {L"Скорость воспроизведения",L"Playback rate"},
+ {L"Системная дорожка",L"Default stream"},
+ {L"Загрузка дорожек",L"Loading stream details"},
+ {L"Аудио",L"Audio"},
+ {L"Субтитры",L"Subtitles"},
 };
 static_assert(sizeof(phrases)/sizeof(phrases[0])==S_COUNT,"localisation table is out of step with Str");
 const wchar_t* T(Str s){
@@ -289,3 +369,16 @@ const wchar_t* IcFilter   =L"M3.6 5 L20.4 5 L14 13.2 L14 19.4 L10 19.4 L10 13.2 
 const wchar_t* IcFolderIc =L"M3.6 8 C3.6 6.8 4.6 5.8 5.8 5.8 L9.6 5.8 L11.6 7.8 L18.2 7.8 C19.4 7.8 20.4 8.8 20.4 10 L20.4 17 C20.4 18.2 19.4 19.2 18.2 19.2 L5.8 19.2 C4.6 19.2 3.6 18.2 3.6 17 Z";
 const wchar_t* IcGridPhoto=L"M4 4.4 L10.2 4.4 L10.2 10.6 L4 10.6 Z M13.8 4.4 L20 4.4 L20 10.6 L13.8 10.6 Z M4 13.8 L10.2 13.8 L10.2 20 L4 20 Z M13.8 13.8 L20 13.8 L20 20 L13.8 20 Z";
 const wchar_t* IcCheckbox =L"M5 12.4 L9.6 17 L19 6.6";
+// Transport. Filled shapes, because a play triangle drawn as an outline reads
+// as a direction marker rather than as a button.
+const wchar_t* IcPlay     =L"M8.2 4.6 L19 12 L8.2 19.4 Z";
+const wchar_t* IcPause    =L"M8.6 4.8 L11.2 4.8 L11.2 19.2 L8.6 19.2 Z M12.8 4.8 L15.4 4.8 L15.4 19.2 L12.8 19.2 Z";
+// Transport skip: two triangles, the shape every player has used since tape.
+const wchar_t* IcRewind   =L"M11.4 6.4 L11.4 17.6 L3.8 12 Z M20.2 6.4 L20.2 17.6 L12.6 12 Z";
+const wchar_t* IcForward  =L"M12.6 6.4 L12.6 17.6 L20.2 12 Z M3.8 6.4 L3.8 17.6 L11.4 12 Z";
+const wchar_t* IcVolume   =L"M4.6 9.4 L8 9.4 L12.4 5.4 L12.4 18.6 L8 14.6 L4.6 14.6 Z M15.4 9.2 C16.6 10.2 16.6 13.8 15.4 14.8 M17.8 6.8 C20.2 8.8 20.2 15.2 17.8 17.2";
+const wchar_t* IcMuted    =L"M4.6 9.4 L8 9.4 L12.4 5.4 L12.4 18.6 L8 14.6 L4.6 14.6 Z M15.4 9.6 L20 14.4 M20 9.6 L15.4 14.4";
+// These deliberately follow the same 24-point geometry as the rest of the
+// shell. A transport cannot feel like it came from a different application.
+const wchar_t* IcSettings =L"M12 8.2 C14.1 8.2 15.8 9.9 15.8 12 C15.8 14.1 14.1 15.8 12 15.8 C9.9 15.8 8.2 14.1 8.2 12 C8.2 9.9 9.9 8.2 12 8.2 Z M12 3.5 L13.2 5.4 L15.4 5.8 L16.8 4.2 L19.8 7.2 L18.2 8.6 L18.6 10.8 L20.5 12 L18.6 13.2 L18.2 15.4 L19.8 16.8 L16.8 19.8 L15.4 18.2 L13.2 18.6 L12 20.5 L10.8 18.6 L8.6 18.2 L7.2 19.8 L4.2 16.8 L5.8 15.4 L5.4 13.2 L3.5 12 L5.4 10.8 L5.8 8.6 L4.2 7.2 L7.2 4.2 L8.6 5.8 L10.8 5.4 Z";
+const wchar_t* IcTracks   =L"M5 5.5 L19 5.5 M5 12 L19 12 M5 18.5 L19 18.5 M3.4 5.5 L3.5 5.5 M3.4 12 L3.5 12 M3.4 18.5 L3.5 18.5";

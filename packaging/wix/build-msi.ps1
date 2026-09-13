@@ -97,9 +97,48 @@ $distDir = Split-Path $ExePath -Parent
 $lensDbPath = Join-Path $distDir 'lensfun-db'
 $readmePath = Join-Path $distDir 'README.txt'
 $noticesPath = Join-Path $distDir 'THIRD_PARTY_NOTICES.txt'
-foreach ($required in @($lensDbPath, $readmePath, $noticesPath)) {
+# The playback engine, loaded by name from beside the executable.
+$mpvPath = Join-Path $distDir 'libmpv-2.dll'
+foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath)) {
     if (-not (Test-Path $required)) { throw "[MSI] Required runtime payload is missing: $required" }
 }
+
+# Video and audio "Open with" registration, generated from the same extension
+# lists the viewer routes by (VetroView\src\media.cpp), so the installer can
+# never offer a format the viewer does not open or miss one it does.
+if (-not $RepoRoot) { $RepoRoot = Split-Path (Split-Path $ScriptDir -Parent) -Parent }
+$mediaSource = Join-Path $RepoRoot 'VetroView\src\media.cpp'
+if (-not (Test-Path $mediaSource)) { throw "[MSI] Extension lists not found: $mediaSource" }
+$mediaText = [System.IO.File]::ReadAllText($mediaSource)
+function Get-ExtensionList([string]$name) {
+    if ($mediaText -notmatch "(?s)$name=\s*(.*?);") { throw "[MSI] $name not found in media.cpp" }
+    $joined = ([regex]::Matches($Matches[1], 'L"([^"]*)"') | ForEach-Object { $_.Groups[1].Value }) -join ''
+    return $joined -split '\|' | Where-Object { $_ -like '.*' }
+}
+$mediaExtensions = @(Get-ExtensionList 'VideoExtensions') + @(Get-ExtensionList 'AudioExtensions') | Sort-Object -Unique
+$command = '&quot;[INSTALLFOLDER]VetroLook.exe&quot; &quot;%1&quot;'
+$icon = '&quot;[INSTALLFOLDER]VetroLook.exe&quot;,0'
+$mediaFragment = Join-Path $ScriptDir 'VetroLook.media.wxi'
+$mx = New-Object System.Collections.Generic.List[string]
+$mx.Add('<Include>')
+$mx.Add('<Fragment xmlns="http://wixtoolset.org/schemas/v4/wxs">')
+$mx.Add('  <DirectoryRef Id="INSTALLFOLDER">')
+$mx.Add('    <Component Id="MediaAssociations" Guid="5E7A1C2B-9D3F-4A6E-8B1C-2D4F6A8C0E13">')
+$mx.Add('      <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Media" Value="Vetro Look Media" Type="string" KeyPath="yes" />')
+$mx.Add('      <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Media" Name="FriendlyTypeName" Value="Vetro Look Media" Type="string" />')
+$mx.Add(('      <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Media\shell\open\command" Value="{0}" Type="string" />' -f $command))
+$mx.Add(('      <RegistryValue Root="HKLM" Key="Software\Classes\VetroLook.Media\DefaultIcon" Value="{0}" Type="string" />' -f $icon))
+foreach ($ext in $mediaExtensions) {
+    $mx.Add(('      <RegistryValue Root="HKLM" Key="Software\Classes\Applications\VetroLook.exe\SupportedTypes" Name="{0}" Value="" Type="string" />' -f $ext))
+    $mx.Add(('      <RegistryValue Root="HKLM" Key="Software\VetroLook\Capabilities\FileAssociations" Name="{0}" Value="VetroLook.Media" Type="string" />' -f $ext))
+    $mx.Add(('      <RegistryValue Root="HKLM" Key="Software\Classes\{0}\OpenWithProgids" Name="VetroLook.Media" Value="" Type="string" />' -f $ext))
+}
+$mx.Add('    </Component>')
+$mx.Add('  </DirectoryRef>')
+$mx.Add('</Fragment>')
+$mx.Add('</Include>')
+[System.IO.File]::WriteAllLines($mediaFragment, $mx, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "[MSI] Media associations: $($mediaExtensions.Count) video and audio extensions"
 $lensFragment = Join-Path $ScriptDir 'VetroLook.lensfun.wxi'
 $xml = New-Object System.Collections.Generic.List[string]
 $xml.Add('<Include>')
@@ -123,7 +162,7 @@ if (Test-Path $outMsi) { Remove-Item $outMsi -Force }
 # once before giving up.
 $buildOk = $false
 for ($attempt = 1; $attempt -le 2; $attempt++) {
-    & $wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext -d "ExePath=$ExePath" -d "LensfunDbPath=$lensDbPath" -d "ReadmePath=$readmePath" -d "NoticesPath=$noticesPath" -d "ProductVersion=$Version" -pdbtype none -out $outMsi $wxs
+    & $wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext -d "ExePath=$ExePath" -d "LensfunDbPath=$lensDbPath" -d "ReadmePath=$readmePath" -d "NoticesPath=$noticesPath" -d "MpvPath=$mpvPath" -d "ProductVersion=$Version" -pdbtype none -out $outMsi $wxs
     if ($LASTEXITCODE -eq 0) { $buildOk = $true; break }
     Write-Warning "[MSI] wix build attempt $attempt failed (exit $LASTEXITCODE), retrying..."
     Start-Sleep -Seconds 2

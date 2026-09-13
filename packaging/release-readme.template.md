@@ -34,6 +34,7 @@ msiexec /i VetroLook-{{VERSION}}-x64.msi /qn
 msiexec /x VetroLook-{{VERSION}}-x64.msi /qn
 ```
 
+<!-- msix -->
 ## VetroLook-{{VERSION}}-x64.msix (MSIX / Microsoft Store)
 
 Built unsigned, as required for Microsoft Store submission — the Store signs
@@ -47,6 +48,15 @@ can be produced with `.\build-packages.ps1 -LocalTestSign`; see
 `packaging/msix/local-test/`. That dev certificate must not be distributed —
 it exists purely so this package can be installed on a development machine
 before a real Store signature is available.
+<!-- /msix -->
+
+## AI subtitles
+
+None of the packages contains the speech runtime or model. Open the **…**
+menu in Vetro Look and choose **AI subtitles · Download** (about 1.2 GB,
+once): the runtime, speech detector and model are fetched from their official
+sources, checked against their published SHA-256 and stored under
+`%LOCALAPPDATA%\VetroLook`. The same row removes them again.
 
 ## Verifying downloads
 
@@ -55,6 +65,7 @@ actually produced by the last packaging run.
 
 ## Portable build (optional)
 
-`VetroLook-{{VERSION}}-Portable.zip` contains just `VetroLook.exe` plus its
-license/notices — no installation, no uninstaller, nothing written outside
-the folder you extract it to.
+`VetroLook-{{VERSION}}-Portable.zip` contains `VetroLook.exe`, the playback
+engine `libmpv-2.dll`, the Lensfun database and the license/notices — no
+installation and no uninstaller. The viewer keeps its settings and caches under
+`%LOCALAPPDATA%\VetroLook`.

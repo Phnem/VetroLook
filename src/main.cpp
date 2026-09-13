@@ -9,6 +9,23 @@
 #include "pipeline.h"
 #include "metacache.h"
 #include "lensdb.h"
+#include "media.h"
+#include "modes.h"
+#include "videomode.h"
+#include "resolver.h"
+#include "ai.h"
+#include "enhance.h"
+// The session log is UTF-8 (see Log). codecvt is deprecated in C++17 without a
+// replacement in the standard library; this is its one use.
+#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+#include <codecvt>
+#include <locale>
+#include "capability.h"
+#include "pacing.h"
+#include "governor.h"
+#include "preview.h"
+#include "mediastate.h"
+#include "smtc.h"
 #include <roapi.h>
 #include <windowsx.h>
 #include <dwmapi.h>
@@ -33,8 +50,14 @@
 using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
 
+constexpr UINT SystemTransport=WM_APP+40;
+// The page resolver has an answer (resolver.h).
+constexpr UINT StreamResolved=WM_APP+41;
+// The speech model download: wParam 1 is progress, 2 is done with lParam 1 on success.
+constexpr UINT AiProgress=WM_APP+42;
 constexpr UINT Loaded=WM_APP+1,Preview=WM_APP+2,Tray=WM_APP+3,Saved=WM_APP+4,ActivateNormal=WM_APP+5,
- MetaReady=WM_APP+6,ThumbReady=WM_APP+7,IndexFolders=WM_APP+8,IndexProgress=WM_APP+9;
+ MetaReady=WM_APP+6,ThumbReady=WM_APP+7,IndexFolders=WM_APP+8,IndexProgress=WM_APP+9,
+ VideoReady=WM_APP+10;
 
 // ---------------------------------------------------------------- ids ------
 enum Id{
@@ -56,6 +79,7 @@ enum Id{
  IdFilterProfileAdobe,IdFilterProfileNone,IdFilterSizeLo,IdFilterSizeHi,IdFilterClear,IdFilterApply,
  IdFilterPopup,IdSortPopup,IdLibBrand,
  IdFavourites,IdFavouritesChip,
+ IdSyncRow,IdPowerRow,IdSeekStep,IdDiagnostics,IdAiModel,IdAiLanguage,IdSilenceSkip,IdEnhancement,
  IdGallery0=4096,
  IdFilterExt0=1<<19,       // +one per supported extension
  IdCard0=1<<21             // +one per visible library/album grid cell
@@ -239,7 +263,13 @@ constexpr size_t LargeUploadBytes=32ull*1024*1024;
 std::vector<std::wstring> requestFiles;
 // A partial result is the fast first look: the camera's embedded preview or a
 // scaled decode, replaced in place once the full-resolution frame is ready.
-struct Result{uint64_t id;std::wstring path,error,key;std::shared_ptr<Image> image;std::vector<std::wstring> files;bool partial=false;};
+struct Result{uint64_t id;std::wstring path,error,key;std::shared_ptr<Image> image;std::vector<std::wstring> files;bool partial=false;
+ // A listing with no decode: what Video Mode needs from this worker, since the
+ // filmstrip is shared between the modes but the frame is not.
+ bool listOnly=false;
+ // What the bytes turned out to be, when they disagreed with the name. The
+ // window re-opens the file in the mode this names.
+ MediaKind reroute=MediaKind::Unsupported;};
 void RequestFullResolution();
 // Preview and full-resolution results may be produced faster than the window
 // thread handles WM_APP.  A single slot lets the full frame overwrite the
@@ -315,7 +345,72 @@ bool needFrame=true;
 std::chrono::steady_clock::time_point openStarted;
 uint64_t latencyId=0,currentGeneration=0;bool firstVisibleLogged=false,fullVisibleLogged=false;
 
-void Open(const std::wstring& path,bool force=false);
+// Which presentation mode owns the surface, and what the file in front of the
+// viewer turned out to be. One window, two modes: see modes.h.
+ModeMachine mediaMode;
+MediaRoute currentRoute;
+// The dock is built from what the current mode can actually do, so a film never
+// shows a crop button and a photograph never shows a timeline. Layout fills it;
+// PaintDock draws exactly what Layout placed.
+std::vector<int> dockOrder;
+bool requestListOnly=false;
+// Arrow seek in Video Mode. The plan offers five or ten seconds; ten is the
+// default, and the choice becomes a setting when the settings panel grows a
+// video section.
+double seekStepSeconds=10.0;     // 20.4: five or ten, and ten by default
+int aiLanguage=0;                // 0 automatic, 1 Russian, 2 English
+const wchar_t* AiLanguageCode(){return aiLanguage==1?L"ru":aiLanguage==2?L"en":L"";}
+// Video enhancement (17): the viewer's mode, what is running, why, and the film
+// the governor has already had to take it away from -- which then stays without
+// it, rather than having it switched back on to be taken away again.
+int enhancementMode=1;           // EnhancementMode: 0 off, 1 auto, 2 on
+EnhancementPlan enhancementPlan;
+const wchar_t* enhancementReason=L"not decided yet";
+uint64_t enhancementHeldFor=0;
+bool viewerRegistered=false;   // this build's shell registration is published
+
+// ------------------------------------------------------- playback quality ----
+// Stage 3. Three decisions and the numbers behind them: when a frame should be
+// shown (pacing), what may be spent on anything that is not the picture (the
+// Governor), and what the machine is capable of in the first place.
+SyncPolicy syncPolicy=SyncPolicy::Auto;
+int powerMode=0;                       // 0 auto, 1 performance, 2 efficiency
+PowerFacts powerFacts;
+MemoryFacts memoryFacts;
+PacingPlan pacingPlan;
+PipelineChoice pipelineChoice;
+GovernorPolicy governorPolicy;
+double lateFrameRate=0;                // late frames per minute, smoothed
+bool pictureInPicture=false;
+// 33.2: pinned is always on top; unpinned takes its turn with other windows.
+bool pipPinned=true;
+void TogglePictureInPicture();
+// Frames drawn while the window is being created, resized, or handed a new film
+// are expensive for reasons that have nothing to do with whether this machine can
+// keep up. Measuring them is fine; deciding anything from them is not, so the
+// deadline signal is ignored for a moment afterwards and the window is emptied.
+double qualitySettleUntil=0;
+void QualitySettle();
+void SyncDisplayTarget(bool force);
+// `immediate` is for a change the viewer made or a display that is now a
+// different display. Everything else waits out the dwell below.
+void ApplyPacing(bool immediate=false);
+double pacingChangedAt=0;
+std::wstring DiagnosticsText();
+struct StreamBudget StreamBudgetNow();
+// A file may be re-opened once, in the mode its bytes call for, after a worker
+// found the name misleading. Set while that second open is in flight so a file
+// that probes inconsistently cannot bounce between modes.
+MediaKind rerouting=MediaKind::Unsupported;
+// The frame size the window was last shaped for, so a film is measured once and
+// not again on every event the engine sends, and the shape itself. Zero while no
+// film is open, and ignored while the window is maximised, where the monitor's
+// shape wins.
+unsigned shapedWidth=0,shapedHeight=0;
+double videoAspect=0;
+void FitWindowToVideo(unsigned videoWidth,unsigned videoHeight);
+void Open(const std::wstring& path,bool force=false,MediaKind forced=MediaKind::Unsupported);
+void SyncVideoSurface();
 void Fit();
 void SyncGallery();
 
@@ -324,6 +419,16 @@ double Now(){return double(GetTickCount64())/1000.0;}
 std::mutex logMx;   // the decode worker reports its own timings
 void Log(const std::wstring& s){
  std::lock_guard lock(logMx);
+ // A wide stream in the "C" locale fails on the first character outside ASCII
+ // and then drops every line after it without a word -- which is how a Russian
+ // status line once silenced the whole session log. UTF-8, set before the first
+ // write, and a failed line never takes the rest of the log down with it.
+ static bool utf8=false;
+ if(logFile.is_open()&&!utf8){
+  logFile.imbue(std::locale(logFile.getloc(),new std::codecvt_utf8<wchar_t>));
+  utf8=true;
+ }
+ if(logFile.is_open()&&logFile.fail())logFile.clear();
  if(logFile){logFile<<GetTickCount64()-boot<<L"ms "<<s<<L"\n";logFile.flush();}
  OutputDebugStringW((s+L"\n").c_str());
 }
@@ -357,6 +462,14 @@ int HitTest(float x,float y){
  return IdNone;
 }
 std::wstring Name(){return currentPath.empty()?std::wstring():fs::path(currentPath).filename().wstring();}
+// "Subtitle delay: +0.3 s", or "none" when it is back at zero. One place,
+// because three different notices of the same shape would drift apart.
+std::wstring DelayNote(const std::wstring& label,double seconds){
+ if(fabs(seconds)<0.001)return label+L": "+T(S_DelayNone);
+ wchar_t amount[32];
+ swprintf_s(amount,L"%+.1f",seconds);
+ return label+L": "+amount+(language?L" s":L" с");
+}
 void Notify(const std::wstring& text){toast=text;toastUntil=Now()+2.6;toastIn.To(1);Wake();}
 
 constexpr float MinZoom=.02f,MaxZoom=32.f;
@@ -755,7 +868,7 @@ void GpuPreUpload(const std::shared_ptr<Image>& image,const std::wstring& key,co
  if(gpuUploads.load()+gpuReuses.load()!=before)gpuPreUploads++;
 }
 
-void ReleaseBitmaps(){bitmap.Reset();backdrop.Reset();GpuRelease();thumbBitmaps.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();scopeBitmap.Reset();}
+void ReleaseBitmaps(){VideoModeReleaseTextures();bitmap.Reset();backdrop.Reset();GpuRelease();thumbBitmaps.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();scopeBitmap.Reset();}
 
 // ------------------------------------------------------------ worker -------
 // Prefetch order, rebuilt from how the reader is actually moving. A fixed
@@ -775,14 +888,14 @@ std::vector<int> PrefetchSteps(int direction,bool fast){
 void Worker(){
  CoInitializeEx(nullptr,COINIT_MULTITHREADED);
  while(true){
-  std::wstring path;uint64_t id;bool quick,force,wantFull;unsigned edge;
+  std::wstring path;uint64_t id;bool quick,force,wantFull,listOnly;unsigned edge;
   std::vector<std::wstring> files;
   {
    std::unique_lock lock(mx);
    cv.wait(lock,[]{return stopping||!requested.empty();});
    if(stopping)break;
    path=std::move(requested);requested.clear();id=generation;quick=requestPreview;force=requestForce;edge=requestEdge;
-   files=std::move(requestFiles);wantFull=requestFull;
+   files=std::move(requestFiles);wantFull=requestFull;listOnly=requestListOnly;
   }
   auto post=[&](std::unique_ptr<Result> result){
    {std::lock_guard lock(mx);ready.push_back(std::move(result));}
@@ -791,15 +904,26 @@ void Worker(){
   auto stale=[id]{return latest!=id;};
   std::error_code ec;
   bool hasCurrent=(!files.empty()&&std::find(files.begin(),files.end(),path)!=files.end());
-  if(!hasCurrent&&!quick){
+  if((!hasCurrent||listOnly)&&!quick){
    files.clear();
+   // The filmstrip is shared between the modes, so the walk is over media, not
+   // over photographs: a folder of a holiday is images and films interleaved,
+   // and arrow navigation has to run through it in file order.
    for(fs::directory_iterator it(fs::path(path).parent_path(),fs::directory_options::skip_permission_denied,ec),end;it!=end&&!ec;it.increment(ec)){
     auto& e=*it;if(latest!=id)break;
-    if(e.is_regular_file(ec)&&Supported(e.path().wstring()))files.push_back(e.path().wstring());
+    if(e.is_regular_file(ec)&&SupportedMedia(e.path().wstring()))files.push_back(e.path().wstring());
    }
    std::sort(files.begin(),files.end(),[](auto&a,auto&b){return StrCmpLogicalW(a.c_str(),b.c_str())<0;});
   }
   if(latest!=id)continue;
+  // A listing for Video Mode: no decode, no cache work, nothing that would put
+  // a photograph's pixels behind a film.
+  if(listOnly){
+   auto listing=std::make_unique<Result>();
+   listing->id=id;listing->path=path;listing->files=std::move(files);listing->listOnly=true;
+   post(std::move(listing));
+   continue;
+  }
   auto fullKey=FrameKey(path,CacheFull,0),screenKey=FrameKey(path,CacheScreen,edge);
   auto full=force?std::shared_ptr<Image>():CacheGet(fullKey);
   auto begin=std::chrono::steady_clock::now();
@@ -829,7 +953,9 @@ void Worker(){
   // Neighbours before the expensive stage. Preparing the next screen-ready
   // frames is what makes the following keypress instant; the full-resolution
   // develop of the frame already on screen can wait for that to be done.
-  if(files.size()>1){
+  // Neighbour prefetch is secondary work (12.3, P2): it waits when the machine
+  // has nothing spare, so the film in front of the viewer keeps its frames.
+  if(files.size()>1&&GovernorNow().neighbourPrefetch){
    auto pos=std::find(files.begin(),files.end(),path);
    if(pos!=files.end()){
     int direction=navigationDirection?navigationDirection:1;
@@ -883,6 +1009,14 @@ void Worker(){
    if(servedFull)rawFullCompleted++;else rawFullCancelled++;
   }
   result->image=full;
+  // Nothing decoded this file as an image. Before reporting a failure, ask the
+  // bytes: a film with a photograph's extension is a file the viewer can open,
+  // not a file it should refuse. The probe happens here, off the window thread,
+  // and only on the path that had already failed.
+  if(!full){
+   auto probed=RouteForPath(path);
+   if(probed.probed&&probed.Playable())result->reroute=probed.kind;
+  }
   Log(L"full_ms="+std::to_wstring(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count())+L" "+path);
   post(std::move(result));
   if(servedFull)CachePut(fullKey,path,CacheFull,full,path);
@@ -907,6 +1041,7 @@ void ApplyCorners(){
 }
 void SetTheme(bool light){
  themeMix.To(light?1.f:0.f);
+ SyncVideoSurface();
  DWORD value=light?1:0;
  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",REG_DWORD,&value,sizeof(value));
  BOOL dark=!light;DwmSetWindowAttribute(win,20,&dark,sizeof(dark));
@@ -938,7 +1073,9 @@ void OpenPanel(int which){
  if(which==PanelInfo)RequestFullResolution();
  if(panel==which&&panelSlide.target>0){ClosePanel();return;}
  confirmDelete=false;menuLevel=0;levelSlide.Reset(0);panelScroll=0;panelScrollVel=0;
- if(which==PanelMenu)tcStatus=TotalCommanderStatus();
+ // Both of these are registry reads, so they are taken when the menu opens
+ // rather than while it is painted.
+ if(which==PanelMenu){tcStatus=TotalCommanderStatus();viewerRegistered=ViewerRegistered();}
  if(panel!=PanelNone&&panel!=which){pendingPanel=which;panelSlide.To(0);}
  else{panel=which;panelSlide.To(1);}
  if(fit)Fit();
@@ -1125,6 +1262,13 @@ void PreviewBounds(){
 }
 void Close(){
  ClosePanel();
+ // Closing the viewer stops the film, whether the window is destroyed or only
+ // hidden to keep the Explorer listener alive. A hidden window that is still
+ // playing is a film nobody is watching and audio nobody asked for.
+ {
+  auto transition=mediaMode.Close();
+  if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ }
  if(preview){
   ShowWindow(win,SW_HIDE);
   SetWindowPos(win,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
@@ -1139,8 +1283,127 @@ void Close(){
   ShowWindow(win,SW_HIDE);
  }else DestroyWindow(win);
 }
-void Open(const std::wstring& path,bool force){
+// Keeps the playback engine's output in step with the window it plays in: the
+// size in device pixels, the window's own corner radius, and the colour it
+// paints where the film does not reach. The engine measures nothing itself --
+// the shell owns the window, and that stays true however video is rendered.
+void SyncVideoSurface(){
+ if(!win)return;
+ RECT r{};GetClientRect(win,&r);
+ float radius=preview?32.f:(WindowMaximized()?0.f:26.f);
+ VideoModeSurface(unsigned((std::max)(8L,r.right)),unsigned((std::max)(8L,r.bottom)),radius*dpi);
+ auto base=Mix(D2D1::ColorF(.055f,.075f,.11f,1.f),D2D1::ColorF(.87f,.91f,.96f,1.f),themeMix.target);
+ VideoModeBackground(uint8_t(base.r*255+.5f),uint8_t(base.g*255+.5f),uint8_t(base.b*255+.5f));
+}
+// The shape of a film decides the shape of the window it plays in. A 16:9 film
+// gets a 16:9 window and a phone recording gets a tall one, so there are never
+// bars of window around the picture -- the film is the window's content, not a
+// rectangle placed inside it.
+//
+void FitWindowToVideo(unsigned videoWidth,unsigned videoHeight){
+ if(!win||preview||!videoWidth||!videoHeight)return;
+ videoAspect=double(videoWidth)/double(videoHeight);
+ // A maximised desktop-shaped window forces a wide film into letterbox bars.
+ // Video Mode is deliberately a floating player, so restore our custom/OS
+ // maximisation before fitting the actual movie aspect ratio.
+ if(customMax)customMax=false;
+ else if(IsZoomed(win))ShowWindow(win,SW_RESTORE);
+ MONITORINFO monitor{sizeof(monitor)};
+ if(!GetMonitorInfoW(MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST),&monitor))return;
+ double workW=monitor.rcWork.right-monitor.rcWork.left;
+ double workH=monitor.rcWork.bottom-monitor.rcWork.top;
+ // Large enough to be worth watching, small enough to leave the desktop
+ // visible around it, and never larger than the work area in either direction.
+ double w=workW*.82,h=w/videoAspect;
+ if(h>workH*.86){h=workH*.86;w=h*videoAspect;}
+ double minEdge=360*dpi;
+ if(w<minEdge){w=minEdge;h=w/videoAspect;}
+ if(h<minEdge){h=minEdge;w=h*videoAspect;}
+ // Grown or shrunk about the window's own centre, then nudged back inside the
+ // work area: a film that changes the window's shape should not move it across
+ // the desktop.
+ RECT r{};GetWindowRect(win,&r);
+ double cx=(r.left+r.right)/2.0,cy=(r.top+r.bottom)/2.0;
+ double x=cx-w/2,y=cy-h/2;
+ if(x<monitor.rcWork.left)x=monitor.rcWork.left;
+ if(y<monitor.rcWork.top)y=monitor.rcWork.top;
+ if(x+w>monitor.rcWork.right)x=monitor.rcWork.right-w;
+ if(y+h>monitor.rcWork.bottom)y=monitor.rcWork.bottom-h;
+ SetWindowPos(win,nullptr,int(x+.5),int(y+.5),int(w+.5),int(h+.5),SWP_NOZORDER|SWP_NOACTIVATE);
+}
+// A stream, opened by address. Deliberately its own path through Open: almost
+// everything below this is about a file -- its folder, its neighbours, its
+// thumbnail, its place in the library -- and a URL has none of those (9.3, 9.4).
+// Plays an address the engine can open directly. `shown` is what the viewer
+// asked for -- a page, say -- and `media` is what is actually played.
+void PlayStream(const std::wstring& shown,const std::wstring& media,const OpenOptions& options,
+                const std::wstring& container){
+ auto route=RouteForUrl(media);
+ route.kind=route.kind==MediaKind::Audio?MediaKind::Audio:MediaKind::Video;
+ if(!container.empty())route.container=container;
+ const std::wstring& url=shown;
+ screen=ScrViewer;
+ if(!preview){KillTimer(win,6);SetWindowLongPtrW(win,GWLP_HWNDPARENT,0);}
+ auto transition=mediaMode.Open(route.kind);
+ if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ current.reset();bitmap.Reset();backdrop.Reset();backdropSource.reset();currentFrameKey.clear();
+ currentPath=url;currentRoute=route;
+ siblings.clear();galleryWidth.clear();
+ rotate.Reset(0);ResetEdits();fit=true;
+ zoomLog.Reset(0);panSX.Reset(0);panSY.Reset(0);
+ info=Meta{};metaPending=false;metaQuickId=0;
+ errorText.clear();loading=false;showingPreview=false;
+ // The last useful part of the address is what a person would call this: the
+ // file name of a direct link, the manifest of a stream.
+ auto name=url;
+ auto slash=name.find_last_of(L'/');
+ if(slash!=std::wstring::npos&&slash+1<name.size())name=name.substr(slash+1);
+ auto query=name.find(L'?');
+ if(query!=std::wstring::npos)name=name.substr(0,query);
+ // A manifest called ".m3u8" or "index.m3u8" names nothing; the host does.
+ if(name.empty()||name[0]==L'.'||_wcsnicmp(name.c_str(),L"index.",6)==0||
+    _wcsnicmp(name.c_str(),L"master.",7)==0||_wcsnicmp(name.c_str(),L"playlist.",9)==0)
+  name=AddressHost(url);
+ if(name.empty())name=url;
+ if(!options.title.empty())name=options.title;
+ SetWindowTextW(win,(name+L" - Vetro Look").c_str());
+ VideoModeSetStreamOptions(options);
+ VideoModeEnter(media,currentRoute,transition.generation,win,VideoReady);
+ SyncVideoSurface();
+ Notify(T(S_Connecting));
+ Log(L"opening stream "+media+L" ("+route.container+L")");
+ Wake();
+}
+
+// A stream, opened by address (66.9): a DRM service gets its sentence at once,
+// a direct link or a manifest opens immediately, and anything else is a page
+// that goes to the resolver first.
+uint64_t resolveGeneration=0;
+std::wstring resolvingAddress;
+void OpenStream(const std::wstring& url){
+ auto source=ClassifyAddress(url);
+ Log(L"address "+url+L" classified as "+StreamSourceName(source));
+ switch(source){
+  case StreamSource::Protected:Notify(T(S_StreamDrm));return;
+  case StreamSource::Unsupported:Notify(T(S_Unavailable));return;
+  case StreamSource::WebPage:
+   if(ResolverPath().empty()){Notify(T(S_NoResolver));return;}
+   resolvingAddress=url;
+   ResolverStart(url,++resolveGeneration,win,StreamResolved);
+   Notify(T(S_ReadingPage));
+   return;
+  default:
+   ResolverCancel();
+   PlayStream(url,url,OpenOptions{},{});
+   return;
+ }
+}
+
+void Open(const std::wstring& path,bool force,MediaKind forced){
  if(path.empty())return;
+ if(LooksLikeUrl(path)){OpenStream(path);return;}
+ // A page still being read belongs to a request the viewer has walked away from.
+ if(ResolverBusy()){ResolverCancel();resolvingAddress.clear();}
  if(!preview){KillTimer(win,6);SetWindowLongPtrW(win,GWLP_HWNDPARENT,0);SetWindowPos(win,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}
  screen=ScrViewer;
  std::error_code ec;
@@ -1157,6 +1420,49 @@ void Open(const std::wstring& path,bool force){
  if(GetMonitorInfoW(MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST),&monitor))
   edge=unsigned((std::min)(4096.f,1.25f*float((std::max)(monitor.rcMonitor.right-monitor.rcMonitor.left,
                                                          monitor.rcMonitor.bottom-monitor.rcMonitor.top))));
+
+ // ------------------------------------------------------------- routing ----
+ // Which mode owns this file is decided from the name, here, on the thread that
+ // has to stay fast. A photograph must not pay a file read to learn that it is a
+ // photograph: the image open path below is byte for byte what it was before
+ // video existed. A file whose name lies is re-opened once, in the mode its
+ // bytes call for, when the worker that tried it reports what it really was.
+ MediaKind kind=forced!=MediaKind::Unsupported?forced:KindFromExtension(nextPath);
+ auto transition=mediaMode.Open(kind);
+ if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ if(kind==MediaKind::Video||kind==MediaKind::Audio){
+  // Entering Video Mode. The window, its chrome, the filmstrip and the theme
+  // are untouched; what changes is which mode draws the media surface.
+  if(transition.releaseImage||changed){
+   current.reset();bitmap.Reset();backdrop.Reset();backdropSource.reset();currentFrameKey.clear();
+  }
+  currentPath=std::move(nextPath);
+  currentRoute=MediaRoute{};currentRoute.kind=kind;
+  rotate.Reset(0);ResetEdits();fit=true;
+  zoomLog.Reset(0);panSX.Reset(0);panSY.Reset(0);
+  liked=FavouriteGet(currentPath);
+  info=Meta{};metaPending=false;metaQuickId=0;
+  for(auto& g:histPath)g.Reset();scopeBitmap.Reset();
+  clipHigh=clipLow=false;clipHighFade.Reset(0);clipLowFade.Reset(0);
+  errorText.clear();loading=false;showingPreview=false;
+  panelScroll=0;panelScrollVel=0;
+  SetWindowTextW(win,(fs::path(currentPath).filename().wstring()+L" - Vetro Look").c_str());
+  VideoModeEnter(currentPath,currentRoute,transition.generation,win,VideoReady);
+  SyncVideoSurface();
+  // The filmstrip is shared, so the folder listing is still the image worker's
+  // job -- it just must not decode anything on the way.
+  {
+   std::lock_guard lock(mx);
+   requested=currentPath;requestPreview=preview;requestForce=false;
+   requestFiles=siblings;requestEdge=edge;requestFull=false;requestListOnly=true;
+   generation++;latest=generation;
+   latencyId=generation;openStarted=std::chrono::steady_clock::now();
+   firstVisibleLogged=false;fullVisibleLogged=true;currentGeneration=0;
+  }
+  cv.notify_one();Wake();
+  SyncGallery();
+  return;
+ }
 
  std::error_code fec;
  auto fpath=fs::path(nextPath);
@@ -1257,7 +1563,7 @@ void Open(const std::wstring& path,bool force){
   std::lock_guard lock(mx);
   requested=currentPath;requestPreview=preview;requestForce=force;
   requestFiles=siblings;
-  requestEdge=edge;requestFull=wantFull;
+  requestEdge=edge;requestFull=wantFull;requestListOnly=false;
   generation++;latest=generation;
   latencyId=generation;openStarted=std::chrono::steady_clock::now();
   firstVisibleLogged=(cached!=nullptr);fullVisibleLogged=(cached&&!isPartial);
@@ -1689,6 +1995,10 @@ void OpenAlbum(const std::wstring& folder){
  PrepareFolderTransition(folder,false);
 }
 void GoToLibrary(){
+ // One media item owns the foreground at a time, and the library is not one:
+ // whatever mode held the surface is closed here, with its resources.
+ auto transition=mediaMode.Close();
+ if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
  SetWindowPos(win,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
  RefreshLibrary();
  auto previousFolder=albumFolder;
@@ -1809,7 +2119,11 @@ void Layout(){
 
  float y0=Margin,y1=Margin+Bubble;
  Hotspot(IdBack,D2D1::RectF(Margin,y0,Margin+Bubble,y1));
- bool wideEnough=w>940;
+ // What this mode can do decides what the window offers. A control that has no
+ // meaning for a film is absent, not dimmed and not inert: the shell asks for a
+ // capability, it does not ask which engine is behind the surface.
+ auto caps=mediaMode.Caps();
+ bool wideEnough=w>940&&caps.canZoom;
  if(wideEnough){
   float left=Margin+Bubble+10,width=236;
   D2D1_RECT_F zoomBar=D2D1::RectF(left,y0,left+width,y1);
@@ -1820,15 +2134,25 @@ void Layout(){
  }
 
  D2D1_RECT_F winBar=LayoutWindowButtons(w);
- float editRight=winBar.left-10;
- D2D1_RECT_F editBubble=D2D1::RectF(editRight-74,y0,editRight,y1);
- Hotspot(IdEdit,editBubble);
- float dockRight=editBubble.left-8;
- float dockWidth=6*Cell+12;
+ float dockRight=winBar.left-10;
+ if(caps.canEdit){
+  float editRight=winBar.left-10;
+  D2D1_RECT_F editBubble=D2D1::RectF(editRight-74,y0,editRight,y1);
+  Hotspot(IdEdit,editBubble);
+  dockRight=editBubble.left-8;
+ }
+ dockOrder.clear();
+ dockOrder.push_back(IdInfo);
+ if(caps.canCopyFrame&&caps.canZoom)dockOrder.push_back(IdCopy);
+ dockOrder.push_back(IdLike);
+ if(caps.canEdit)dockOrder.push_back(IdRotate);
+ if(caps.canZoom)dockOrder.push_back(IdFit);
+ dockOrder.push_back(IdMore);
+ float dockWidth=dockOrder.size()*Cell+12;
  D2D1_RECT_F dock=D2D1::RectF(dockRight-dockWidth,y0,dockRight,y1);
  rects[IdDockBar]=dock;
- const int dockIds[6]={IdInfo,IdCopy,IdLike,IdRotate,IdFit,IdMore};
- for(int i=0;i<6;i++)Hotspot(dockIds[i],D2D1::RectF(dock.left+6+i*Cell,y0+2,dock.left+6+i*Cell+Cell,y1-2));
+ for(size_t i=0;i<dockOrder.size();i++)
+  Hotspot(dockOrder[i],D2D1::RectF(dock.left+6+i*Cell,y0+2,dock.left+6+i*Cell+Cell,y1-2));
 
  // Filmstrip
  if(siblings.size()>1){
@@ -1878,6 +2202,16 @@ void Layout(){
      rowTop+=52;
     }
     rowTop+=GroupGap;
+    // Playback rows belong to a film, so they appear only when one is open.
+    if(mediaMode.InVideo()){
+     row(IdSyncRow,RowH);row(IdPowerRow,RowH);row(IdSeekStep,RowH);row(IdEnhancement,RowH);
+     if(AiInstalled()){row(IdAiLanguage,RowH);row(IdSilenceSkip,RowH);}
+     row(IdDiagnostics,RowH);
+     rowTop+=GroupGap;
+    }
+    // AI subtitles are downloaded from here whether or not a film is open: the
+    // download is large, and the viewer should be able to start it ahead of time.
+    row(IdAiModel,RowH);
     row(IdDefaultApp,RowH);row(IdSpacePreview,RowH);
     if(tcStatus!=TcMissing)row(IdTotalCmd,RowH);
     rowTop+=GroupGap;
@@ -2120,6 +2454,24 @@ void PaintXmpRating(D2D1_RECT_F row,const Palette& p,float alpha){
  std::wstring stars(size_t((std::max)(0,(std::min)(5,info.rating))),L'★');
  Write(stars,row,F_Small,Fade(Mix(p.text,D2D1::ColorF(1.f,.78f,.28f,1.f),.85f),alpha));
 }
+// The filename belongs to the title chrome, not a separate badge. Give it the
+// whole quiet centre lane: it is larger and readable by its soft text shadow,
+// without another capsule competing with the controls.
+D2D1_RECT_F VideoTitleRect(float w,float dockLeft,float leftEdge){
+ if(currentPath.empty())return D2D1::RectF(0,0,0,0);
+ float available=dockLeft-leftEdge-24.f;
+ if(available<150.f)return D2D1::RectF(0,0,0,0);
+ float centre=(leftEdge+dockLeft)/2;
+ return D2D1::RectF(centre-available/2,Margin,centre+available/2,Margin+Bubble);
+}
+void PaintVideoTitle(float w,const Palette& p,float dockLeft,float leftEdge){
+ auto r=VideoTitleRect(w,dockLeft,leftEdge);
+ if(r.right<=r.left)return;
+ // A two-pixel diffuse offset has the contrast reserve of a caption without
+ // putting any visible panel behind it.
+ Write(Name(),D2D1::RectF(r.left,r.top+1.5f,r.right,r.bottom+1.5f),F_VideoTitle,D2D1::ColorF(0,0,0,.68f));
+ Write(Name(),r,F_VideoTitle,Fade(p.text,.98f));
+}
 void PaintTitle(float w,const Palette& p,float dockLeft,float leftEdge){
  if(currentPath.empty())return;
  float centre=(leftEdge+dockLeft)/2;
@@ -2181,9 +2533,10 @@ void PaintDock(const Palette& p){
  auto dock=R(IdDockBar);
  if(Width(dock)<=0)return;
  Glass(D2D1::RoundedRect(dock,Bubble/2,Bubble/2),p,1.f,D2D1::Matrix3x2F::Identity());
+ auto placed=[&](int id){return std::find(dockOrder.begin(),dockOrder.end(),id)!=dockOrder.end();};
  IconButton(IdInfo,IcInfo,p,1.f,panel==PanelInfo?p.accent:p.text);
  bool checked=Now()<copyUntil;
- IconButton(IdCopy,checked?IcCheck:IcCopy,p,1.f,checked?D2D1::ColorF(.30f,.85f,.45f,1.f):p.text);
+ if(placed(IdCopy))IconButton(IdCopy,checked?IcCheck:IcCopy,p,1.f,checked?D2D1::ColorF(.30f,.85f,.45f,1.f):p.text);
  // Favourite: the heart itself overshoots, with a restrained particle burst.
  {
   auto r=R(IdLike);
@@ -2202,8 +2555,8 @@ void PaintDock(const Palette& p){
    }
   }
  }
- IconButton(IdRotate,IcRotate,p,1.f,p.text,rotate.v);
- IconButton(IdFit,fit?IcExpand:IcCompress,p,1.f,fit?p.text:p.accent);
+ if(placed(IdRotate))IconButton(IdRotate,IcRotate,p,1.f,p.text,rotate.v);
+ if(placed(IdFit))IconButton(IdFit,fit?IcExpand:IcCompress,p,1.f,fit?p.text:p.accent);
  IconButton(IdMore,IcDots,p,1.f,panel==PanelMenu?p.accent:p.text,0,true);
 }
 void PaintEditBubble(const Palette& p){
@@ -2597,7 +2950,58 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
   }
   SegmentedRow(IdThemeRow,IdThemeDark,IdThemeLight,themeMix.v>.5f?IcSun:IcMoon,T(S_ThemeLabel),T(S_Dark),T(S_Light),themeMix.v,p,alpha);
   SegmentedRow(IdWheelRow,IdWheelZoom,IdWheelNav,IcMouse,T(S_WheelLabel),T(S_WheelZoom),T(S_WheelNav),wheelMix.v,p,alpha);
-  PanelRow(IdDefaultApp,IcDefault,T(S_DefaultApp),p,alpha,true,p.text);
+  if(mediaMode.InVideo()){
+   const Str syncNames[]={S_SyncAuto,S_SyncSmooth,S_SyncLatency};
+   const Str powerNames[]={S_PowerAuto,S_PowerPerformance,S_PowerEfficiency};
+   PanelRow(IdSyncRow,IcPlay,T(S_SyncLabel),p,alpha,false,p.text,T(syncNames[int(syncPolicy)]));
+   PanelRow(IdPowerRow,IcDefault,T(S_PowerLabel),p,alpha,false,p.text,T(powerNames[powerMode]));
+   PanelRow(IdSeekStep,IcForward,T(S_SeekStep),p,alpha,false,p.text,
+            seekStepSeconds<7.5?(language?L"5 s":L"5 с"):(language?L"10 s":L"10 с"));
+   const Str enhancementNames[]={S_EnhanceOff,S_EnhanceAuto,S_EnhanceOn};
+   PanelRow(IdEnhancement,IcDefault,T(S_Enhancement),p,alpha,false,p.text,T(enhancementNames[enhancementMode]));
+   if(AiInstalled()){
+    const Str languages[]={S_AiLanguageAuto,S_AiLanguageRu,S_AiLanguageEn};
+    PanelRow(IdAiLanguage,IcDefault,T(S_AiLanguage),p,alpha,false,p.text,T(languages[aiLanguage]));
+    const Str skips[]={S_SkipOff,S_SkipGentle,S_SkipAggressive};
+    PanelRow(IdSilenceSkip,IcForward,T(S_SilenceSkip),p,alpha,false,p.text,T(skips[int(VideoModeSilenceSkip())]));
+   }
+   PanelRow(IdDiagnostics,IcCopy,T(S_Diagnostics),p,alpha,false,p.text);
+  }
+  // AI subtitles are a download the viewer chooses, so the row says what it
+  // costs and how to take it back (27.9): Download and the size, progress while
+  // it arrives, or the size on disk and Remove.
+  {
+   auto ai=AiStatusNow();
+   auto size=[&](uint64_t bytes){
+    wchar_t text[32];
+    if(bytes>=1000ull*1048576ull)swprintf_s(text,language?L"%.1f GB":L"%.1f ГБ",double(bytes)/1073741824.0);
+    else swprintf_s(text,language?L"%.0f MB":L"%.0f МБ",double(bytes)/1048576.0);
+    return std::wstring(text);
+   };
+   bool fetching=ai.state==AiState::Downloading;
+   std::wstring value;
+   if(fetching){wchar_t percent[16];swprintf_s(percent,L"%.0f%%",ai.downloadFraction*100);value=percent;}
+   else if(AiInstalled())value=size(AiInstalledBytes())+L" · "+T(S_AiRemove);
+   else value=std::wstring(T(S_AiDownload))+L" · "+size(AiDownloadBytes());
+   PanelRow(IdAiModel,IcDefault,T(S_AiModel),p,alpha,false,p.text,value.c_str());
+   if(fetching){
+    // A thin bar along the foot of the row, in the row's own colours.
+    auto r=R(IdAiModel);
+    if(Width(r)>0){
+     float left=r.left+56,right=r.right-20,y=r.bottom-8;
+     float fraction=Clamp(float(ai.downloadFraction),0,1);
+     Ink()->SetColor(Fade(p.faint,alpha*.45f));
+     Dc()->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left,y-1.5f,right,y+1.5f),1.5f,1.5f),Ink());
+     Ink()->SetColor(Fade(p.text,alpha));
+     Dc()->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left,y-1.5f,(std::max)(left+3,left+(right-left)*fraction),y+1.5f),1.5f,1.5f),Ink());
+    }
+   }
+  }
+  // "On" here means this build's own registration is published. A build that
+  // learned to open more formats than the one that registered stops saying so,
+  // which is the only signal a person gets that the list has grown.
+  PanelRow(IdDefaultApp,IcDefault,T(S_DefaultApp),p,alpha,true,p.text,
+   viewerRegistered?T(S_On):nullptr);
   PanelRow(IdSpacePreview,IcSpace,T(S_SpacePreview),p,alpha,false,p.text,T(autostart?S_On:S_Off));
   if(tcStatus!=TcMissing)
    PanelRow(IdTotalCmd,IcDefault,L"Total Commander",p,alpha,false,p.text,T(tcStatus==TcInstalled?S_Remove:S_Install));
@@ -2736,6 +3140,36 @@ void PaintGallery(const Palette& p){
  // next item a worker claims.
  if(active>=0&&active<int(siblings.size()))ThumbPrioritize(siblings[size_t(active)]);
  target->PopAxisAlignedClip();
+}
+// Over a film a toast belongs to the player: it rises out of whatever is at the
+// bottom -- the transport, or the subtitle bubble above it -- and never lands on
+// top of either. Same frosted material, its own compositor glass, and it grows
+// from where it is anchored as it appears.
+D2D1_RECT_F VideoToastRect(float w,D2D1_RECT_F viewport,float chromeAlpha){
+ float a=Clamp(toastIn.v,0,1);
+ if(a<=.01f||toast.empty())return D2D1::RectF(0,0,0,0);
+ float width=(std::min)(viewport.right-viewport.left-80,Measure(toast,F_Button,w)+44);
+ float anchor=viewport.bottom-44;
+ if(chromeAlpha>.01f){
+  float radius=0;
+  auto bar=VideoModeControlGlass(viewport,chromeAlpha,radius);
+  if(bar.right>bar.left)anchor=(std::min)(anchor,bar.top-12);
+ }
+ auto bubble=VideoModeSubtitlePanel();
+ if(bubble.right>bubble.left)anchor=(std::min)(anchor,bubble.top-12);
+ float scale=.9f+.1f*a;
+ float bottom=anchor+(1-a)*8;
+ float cx=(viewport.left+viewport.right)/2;
+ float sw=width*scale,sh=36*scale;
+ return D2D1::RectF(cx-sw/2,bottom-sh,cx+sw/2,bottom);
+}
+void PaintVideoToast(float w,D2D1_RECT_F viewport,float chromeAlpha){
+ auto rect=VideoToastRect(w,viewport,chromeAlpha);
+ if(rect.right<=rect.left)return;
+ float a=Clamp(toastIn.v,0,1);
+ float radius=(rect.bottom-rect.top)/2;
+ VideoModePaintMatteSurface(D2D1::RoundedRect(rect,radius,radius),a);
+ Write(toast,rect,F_Button,D2D1::ColorF(1,1,1,.95f*a));
 }
 void PaintToast(float w,float h,const Palette& p){
  float alpha=toastIn.v;
@@ -3389,6 +3823,12 @@ void Frame(){
    PaintLibraryScreen(w,h,p);
    Dc()->SetTransform(previous);Dc()->PopLayer();
   }
+ }else if(mediaMode.InVideo()){
+  // Video Mode owns the surface. Everything around it -- chrome, filmstrip,
+  // panels, window shape -- is the same shell, drawn by the same code below.
+  VideoModePaint(D2D1::RectF(0,0,w,h),p,
+   Mix(D2D1::ColorF(.055f,.075f,.11f,1.f),D2D1::ColorF(.87f,.91f,.96f,1.f),themeMix.v),1.f);
+  if(!errorText.empty())Write(errorText,D2D1::RectF(40,h/2+90,w-40,h/2+140),F_Row,p.dim);
  }else{
   PaintBackdrop(w,h,p);
   if(!hero.active)PaintImage(w,h,p);
@@ -3407,24 +3847,99 @@ void Frame(){
   if(sortOpen||sortReveal.v>.004f)PaintSortPopup(w,p,sortReveal.v);
   if(filterOpen||filterReveal.v>.004f)PaintFilterPopup(w,h,p,filterReveal.v);
  }else if(!preview){
+  // Set while Video Mode paints its overlay: the subtitle bubble and the toast
+  // are drawn after the chrome's fading layer, not inside it.
+  bool videoOverlay=false;
+  D2D1_RECT_F videoViewport{};
+  float videoChrome=0;
   Dc()->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::Matrix3x2F::Identity(),Clamp(chrome.v,0,1)),nullptr);
-  PaintGallery(p);
-  if(siblings.size()>1){
+  if(!pictureInPicture)PaintGallery(p);
+  if(siblings.size()>1&&!pictureInPicture){
    for(int id:{IdPrevPhoto,IdNextPhoto}){
     auto r=R(id);Glass(D2D1::RoundedRect(r,22,22),p,.85f,D2D1::Matrix3x2F::Identity());
     IconButton(id,id==IdPrevPhoto?IcChevronL:IcChevron,p,1,p.text);
    }
   }
-  PaintBack(p);
-  PaintZoomBar(p);
-  PaintTitle(w,p,R(IdDockBar).left,R(IdZoomBar).right>0?R(IdZoomBar).right:Margin+Bubble);
-  PaintDock(p);
-  PaintEditBubble(p);
-  PaintWindowButtons(p);
-  PaintPanel(p);
-  PaintToast(w,h,p);
+  // The caption sits above the filmstrip, not on it: the strip is the shell's,
+  // and the caption belongs to the film.
+  if(mediaMode.InVideo()){
+   // Over a film every glass surface is frosted by the compositor rather than by
+   // Direct2D: what is behind them is the engine's picture, which this layer
+   // cannot read. The shapes are collected first and drawn second.
+   // The transport sits above the filmstrip when there is one. In picture in
+   // picture there is not, and reserving its height would leave the controls
+   // floating in the middle of a small window.
+   bool stripShown=siblings.size()>1&&!pictureInPicture;
+   auto viewport=D2D1::RectF(0,0,w,stripShown?h-Margin-GalleryH-8:h);
+   // With the chrome faded out there is nothing to frost, and the blur is the
+   // most expensive thing on screen: watching a film costs no glass at all.
+   // The blur is the most expensive thing on screen, so it is the first thing
+   // the Governor takes away (12.4, step 8), and it costs nothing at all while
+   // the chrome is hidden.
+   // Every piece of glass fades with what is painted on it. The chrome's contents
+   // are drawn through a layer at the chrome's alpha and then at that alpha again,
+   // so their glass follows the square of it; the subtitle bubble and the toast
+   // are drawn outside that layer and their glass follows their own strength.
+   float chromeAlpha=Clamp(chrome.v,0,1);
+   float chromeGlass=chromeAlpha*chromeAlpha;
+   auto bubbleShape=VideoModeSubtitlePanel();
+   auto toastShape=VideoToastRect(w,viewport,chromeAlpha);
+   bool anyGlass=chromeAlpha>.01f||bubbleShape.right>bubbleShape.left||toastShape.right>toastShape.left;
+   if(!governorPolicy.glass||!anyGlass)GfxClearGlassBackdrop();
+   else{
+    GfxGlassBegin();
+    if(chromeAlpha>.01f){
+     if(!pictureInPicture){
+      GfxGlassAdd(R(IdBack),Bubble/2,chromeGlass);
+      GfxGlassAdd(R(IdDockBar),Bubble/2,chromeGlass);
+      GfxGlassAdd(R(IdWinBar),Bubble/2,chromeGlass);
+      if(siblings.size()>1){
+       GfxGlassAdd(R(IdGalleryBody),20.f,chromeGlass);
+       GfxGlassAdd(R(IdPrevPhoto),22.f,chromeGlass);
+       GfxGlassAdd(R(IdNextPhoto),22.f,chromeGlass);
+      }
+     }
+     // The side panel is glass like everything else, and over a film the only
+     // blur it can have is the compositor's. Without this it reads as a pane of
+     // clear plastic with text on it.
+     if(panel!=PanelNone||panelSlide.v>.004f)GfxGlassAdd(R(IdPanelBody),22.f,chromeGlass);
+     float transportRadius=30.f;
+     auto transport=VideoModeControlGlass(viewport,chromeAlpha,transportRadius);
+     GfxGlassAdd(transport,transportRadius,chromeGlass);
+     GfxGlassAdd(VideoModePopupPanel(viewport),22.f,chromeGlass);
+     GfxGlassAdd(VideoModePreviewPanel(viewport),14.f,chromeGlass);
+    }
+    // What is being said, and what the viewer was just told, keep their glass
+    // whether or not the controls are up (24.3: the blur is confined to them).
+    GfxGlassAdd(bubbleShape,20.f,VideoModeSubtitleOpacity());
+    GfxGlassAdd(toastShape,18.f,Clamp(toastIn.v,0,1));
+    // A compact frosted material keeps the live scene recognisable. This is a
+    // local 26px sample, never a blur over the film itself.
+    GfxGlassCommit(dpi,26.f*governorPolicy.glassBlurScale);
+   }
+   videoOverlay=true;videoViewport=viewport;videoChrome=chromeAlpha;
+   VideoModePaintOverlay(viewport,p,chromeAlpha,dpi);
+  }
+  // Picture in picture is the film and its transport. The folder, the title,
+  // the toolbar and the window's own buttons are all about a window somebody is
+  // working in, and this one is a window somebody is glancing at.
+  if(!pictureInPicture){
+   PaintBack(p);
+   PaintZoomBar(p);
+   if(mediaMode.InVideo())PaintVideoTitle(w,p,R(IdDockBar).left,Margin+Bubble);
+   else PaintTitle(w,p,R(IdDockBar).left,R(IdZoomBar).right>0?R(IdZoomBar).right:Margin+Bubble);
+   PaintDock(p);
+   PaintEditBubble(p);
+   PaintWindowButtons(p);
+   PaintPanel(p);
+  }
+  if(!videoOverlay)PaintToast(w,h,p);
   if(loading&&!current)Write(T(S_Opening),D2D1::RectF(w/2-90,h-Margin-GalleryH-46,w/2+90,h-Margin-GalleryH-22),F_Meta,p.dim);
   Dc()->PopLayer();
+  if(videoOverlay){
+   VideoModePaintSubtitles(videoViewport,videoChrome);
+   PaintVideoToast(w,videoViewport,videoChrome);
+  }
  }
  GfxPresent(true);
  if(screen==ScrViewer&&current&&bitmap&&latencyId==latest&&currentGeneration==latencyId){
@@ -3432,6 +3947,479 @@ void Frame(){
   if(!firstVisibleLogged){Log(L"first_visible_ms="+std::to_wstring(elapsed)+(showingPreview?L" stage=preview ":L" stage=full ")+currentPath);firstVisibleLogged=true;}
   if(!showingPreview&&!fullVisibleLogged){Log(L"full_visible_ms="+std::to_wstring(elapsed)+L" "+currentPath);fullVisibleLogged=true;}
  }
+}
+
+// The diagnostics block of 53: everything needed to answer "why does this film
+// not play well on my machine", and nothing that identifies the machine's owner.
+// No paths, no file names, no user name -- a person pasting this into a bug
+// report should not have to read it first.
+std::wstring DiagnosticsText(){
+ auto number=[](double value,const wchar_t* format){
+  wchar_t text[48];swprintf_s(text,format,value);return std::wstring(text);
+ };
+ std::wstring out=L"Vetro Look diagnostics\n\n";
+ out+=CapabilityReport(CapabilitiesNow(),powerFacts,memoryFacts);
+ out+=TheGovernor().Explain()+L"\n";
+ const wchar_t* policies[]={L"Auto",L"Smoothness",L"Low latency"};
+ const wchar_t* powers[]={L"Auto",L"Performance",L"Efficiency"};
+ out+=std::wstring(L"Preferences: synchronization ")+policies[int(syncPolicy)]+
+      L", power "+powers[powerMode]+L"\n";
+ out+=PacingReport(pacingPlan);
+ if(PlaybackEngineLoaded())out+=L"Engine: libmpv "+PlaybackEngineVersion()+L"\n";
+ if(mediaMode.InVideo()){
+  auto playback=VideoModeSnapshot();
+  out+=L"Renderer: "+(playback.renderer.empty()?L"none":playback.renderer)+
+       L", decode "+(playback.hwdec.empty()?L"software":playback.hwdec)+
+       L", colour "+(playback.colourTarget.empty()?L"unknown":playback.colourTarget)+L"\n";
+  out+=std::wstring(L"Pipeline: ")+pipelineChoice.note+
+       (pipelineChoice.highQualityScaler?L", high quality scaler":L", cheap scaler")+L"\n";
+  out+=L"Enhancement: "+(playback.enhancement.empty()?std::wstring(L"none"):playback.enhancement)+
+       L" ("+enhancementReason+(playback.enhancementFailed?L", refused by the driver":L"")+L")\n";
+  if(!playback.transfer.empty())out+=L"Film transfer: "+playback.transfer+L"\n";
+  if(playback.width)
+   out+=L"Film: "+std::to_wstring(playback.width)+L"x"+std::to_wstring(playback.height)+
+        L" at "+number(playback.frameRate,L"%.3f")+L" fps, "+
+        (playback.videoCodec.empty()?L"unknown codec":playback.videoCodec)+L"\n";
+  double loopFrom=0,loopTo=0;
+  if(VideoModeLoop(loopFrom,loopTo))
+   out+=L"Loop: "+FormatDuration(loopFrom)+(loopTo>=0?L" to "+FormatDuration(loopTo):L", second point not set")+L"\n";
+  if(VideoModeChapterCount())out+=L"Chapters: "+std::to_wstring(VideoModeChapterCount())+L"\n";
+  if(fabs(VideoModeSubtitleDelay())>0.001||fabs(VideoModeAudioDelay())>0.001){
+   wchar_t delays[96];
+   swprintf_s(delays,L"Delays: subtitles %+.1f s, audio %+.1f s\n",
+              VideoModeSubtitleDelay(),VideoModeAudioDelay());
+   out+=delays;
+  }
+  if(playback.subtitleTrack||!playback.subtitleText.empty()){
+   out+=L"Subtitles: "+VideoModeCueDescription()+L"\n";
+  }
+  out+=L"Frames: dropped "+std::to_wstring(playback.droppedFrames)+
+       L", decoder dropped "+std::to_wstring(playback.decoderDrops)+
+       L", late "+std::to_wstring(playback.delayedFrames)+
+       L", a/v "+number(playback.avSync,L"%.3f")+L" s, jitter "+
+       number(playback.vsyncJitter,L"%.4f")+L"\n";
+  if(playback.targetPending)
+   out+=L"The display's colour changed; the next film opens with the new one.\n";
+  out+=VideoModeNetworkReport();
+  out+=VideoModeAiReport();
+ }
+ out+=L"Preview cache: "+std::to_wstring(PreviewCacheBytes()>>10)+L" KB"+
+      (PreviewAvailable()?L"":L", no preview source for this film")+L"\n";
+ auto budget=StreamBudgetNow();
+ out+=L"Engine queues: "+std::to_wstring(budget.forwardBytes>>20)+L" MB ahead, "+
+      std::to_wstring(budget.backBytes>>20)+L" MB behind\n";
+ return out;
+}
+
+// Where the viewer last put picture in picture, per arrangement of screens
+// (33.4): a position remembered on a three-monitor desk means nothing on the
+// laptop's own panel, so it is only used when the arrangement matches.
+std::wstring MonitorSetup(){
+ wchar_t text[96];
+ swprintf_s(text,L"%d:%dx%d@%d,%d",GetSystemMetrics(SM_CMONITORS),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            GetSystemMetrics(SM_XVIRTUALSCREEN),GetSystemMetrics(SM_YVIRTUALSCREEN));
+ return text;
+}
+void SavePipGeometry(){
+ if(!pictureInPicture)return;
+ RECT r{};
+ if(!GetWindowRect(win,&r))return;
+ wchar_t value[192];
+ swprintf_s(value,L"%ls|%ld|%ld|%ld|%ld|%d",MonitorSetup().c_str(),r.left,r.top,r.right,r.bottom,pipPinned?1:0);
+ RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PipGeometry",REG_SZ,value,
+                 DWORD((wcslen(value)+1)*sizeof(wchar_t)));
+}
+bool LoadPipGeometry(RECT& r,bool& pinned){
+ wchar_t value[192]{};
+ DWORD size=sizeof value;
+ if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PipGeometry",RRF_RT_REG_SZ,nullptr,value,&size)!=ERROR_SUCCESS)
+  return false;
+ std::wstring text=value;
+ auto bar=text.find(L'|');
+ if(bar==std::wstring::npos||text.substr(0,bar)!=MonitorSetup())return false;
+ long left=0,top=0,right=0,bottom=0;int pin=1;
+ if(swscanf_s(text.c_str()+bar+1,L"%ld|%ld|%ld|%ld|%d",&left,&top,&right,&bottom,&pin)!=5)return false;
+ r={left,top,right,bottom};
+ pinned=pin!=0;
+ // Still on a screen, and still large enough for its controls to be usable.
+ return MonitorFromRect(&r,MONITOR_DEFAULTTONULL)!=nullptr&&right-left>=int(240*dpi);
+}
+
+// Picture in picture: the same window, small, always on top, with the same
+// transport inside it. Not a second window and not a second renderer -- the
+// film is already composited here, and a copy of it would cost a second decode.
+void TogglePictureInPicture(){
+ static RECT restore{};
+ static bool wasTopmost=false;
+ if(!pictureInPicture){
+  if(!mediaMode.InVideo())return;
+  GetWindowRect(win,&restore);
+  wasTopmost=(GetWindowLongW(win,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;
+  double aspect=videoAspect>0?videoAspect:16.0/9.0;
+  int width=int(420*dpi),height=int(width/aspect);
+  auto monitor=MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{};info.cbSize=sizeof info;
+  int x=100,y=100;
+  if(monitor&&GetMonitorInfoW(monitor,&info)){
+   // Bottom right of the work area, the corner every other player uses, with a
+   // margin that does not sit under the taskbar's shadow.
+   x=info.rcWork.right-width-int(24*dpi);
+   y=info.rcWork.bottom-height-int(24*dpi);
+  }
+  // Where the viewer put it last time on this arrangement of screens, at the
+  // width they chose; the height always follows this film's own shape.
+  RECT saved{};
+  if(LoadPipGeometry(saved,pipPinned)){
+   width=saved.right-saved.left;
+   height=int(width/aspect);
+   x=saved.left;y=saved.top;
+  }
+  pictureInPicture=true;
+  if(WindowMaximized())ShowWindow(win,SW_RESTORE);
+  SetWindowPos(win,pipPinned?HWND_TOPMOST:HWND_NOTOPMOST,x,y,width,height,SWP_FRAMECHANGED);
+ }else{
+  SavePipGeometry();
+  pictureInPicture=false;
+  SetWindowPos(win,wasTopmost?HWND_TOPMOST:HWND_NOTOPMOST,restore.left,restore.top,
+   restore.right-restore.left,restore.bottom-restore.top,SWP_FRAMECHANGED);
+ }
+ ApplyCorners();
+ SyncVideoSurface();
+ Wake();
+}
+
+// ------------------------------------------------------------- quality -----
+// What the engine's queues may hold (14.2). Derived from what the machine has at
+// this moment rather than from a number chosen once: thirty-two megabytes of
+// demuxed video on a laptop with a gigabyte free is a stall waiting to happen,
+// and five hundred on a workstation is free.
+StreamBudget StreamBudgetNow(){
+ StreamBudget budget;
+ uint64_t available=memoryFacts.availableRam?memoryFacts.availableRam:(2ull<<30);
+ uint64_t forward=available/32;
+ const uint64_t floorBytes=32ull<<20,ceilingBytes=512ull<<20;
+ forward=(std::min)((std::max)(forward,floorBytes),ceilingBytes);
+ bool tight=governorPolicy.tier<=GovernorTier::Constrained;
+ if(tight)forward/=2;
+ budget.forwardBytes=forward;
+ // Behind the playhead, for the step back stage 4 will ask for. A quarter of
+ // what is read ahead is enough for that and small enough to be forgettable.
+ budget.backBytes=forward/4;
+ budget.seconds=tight?5:10;
+ // Live keeps a short read-ahead: there is little ahead of the edge to read,
+ // and latency is the thing a live viewer notices (73).
+ if(mediaMode.InVideo()&&VideoModeSnapshot().live)budget.seconds=(std::min)(budget.seconds,6.0);
+ return budget;
+}
+
+// The pacing decision, recomputed whenever one of its inputs moves. The decision
+// itself lives in pacing.cpp and is pure; this only gathers the inputs.
+void ApplyPacing(bool immediate){
+ if(!mediaMode.InVideo())return;
+ const auto& display=CapabilitiesNow().display;
+ auto playback=VideoModeSnapshot();
+ // What this machine and this film add up to (13.2). The engine has already
+ // chosen its own decode rung by the time this runs, so the value here is not to
+ // override it but to know what was chosen and what it costs: a film being
+ // decoded in software cannot also afford the expensive scaler.
+ MediaProfile media;
+ media.codec=playback.videoCodec;
+ media.width=playback.width;media.height=playback.height;
+ media.fps=playback.frameRate;
+ media.hdr=playback.transfer==L"pq"||playback.transfer==L"hlg";
+ auto choice=ChoosePipeline(CapabilitiesNow(),media,powerFacts);
+ // The engine's own answer beats the prediction: it knows which rung it landed
+ // on, and it knows it a moment later than this is first asked.
+ choice.hardwareDecode=!playback.hwdec.empty()&&playback.hwdec!=L"no";
+ choice.note=PipelineNote(choice);
+ if(choice.note!=pipelineChoice.note||choice.hdrOutput!=pipelineChoice.hdrOutput||
+    choice.toneMap!=pipelineChoice.toneMap){
+  Log(std::wstring(L"PIPELINE ")+choice.note+(choice.hdrOutput?L", HDR output":L"")+
+      (choice.toneMap?L", tone mapped":L"")+(choice.highQualityScaler?L", high quality scaler":L", cheap scaler"));
+ }
+ pipelineChoice=choice;
+
+ // Enhancement (17), decided from the same facts and on the same clock, with its
+ // own short dwell: dragging a window edge changes the wanted scale continuously,
+ // and each change rebuilds the engine's filter chain.
+ {
+  const auto& adapter=CapabilitiesNow().adapter;
+  EnhancementInputs e;
+  e.rtxGpu=adapter.vendor==L"NVIDIA"&&!adapter.integrated&&adapter.description.find(L"RTX")!=std::wstring::npos;
+  // Only frames that are already Direct3D 11 textures can be handed to the video
+  // processor; a copy-back decode lives in system memory.
+  e.hardwareDecodeD3D11=playback.hwdec==L"d3d11va";
+  e.hdrSource=media.hdr;
+  e.onBattery=powerFacts.onBattery||powerMode==2;
+  e.batterySaver=powerFacts.batterySaver;
+  if(powerMode==1){e.onBattery=false;e.batterySaver=false;}
+  // Once the governor has taken enhancement away from this film, it stays away
+  // for this film: switching it back on after the pressure eases would bring the
+  // pressure straight back.
+  if(enhancementPlan.superResolution&&!governorPolicy.enhancement)enhancementHeldFor=mediaMode.generation;
+  e.governorAllows=governorPolicy.enhancement&&enhancementHeldFor!=mediaMode.generation&&!playback.enhancementFailed;
+  e.pictureInPicture=pictureInPicture;
+  e.sourceWidth=playback.width;e.sourceHeight=playback.height;
+  RECT client{};GetClientRect(win,&client);
+  e.presentWidth=unsigned((std::max)(0L,client.right));
+  e.presentHeight=unsigned((std::max)(0L,client.bottom));
+  auto decision=DecideEnhancement(EnhancementMode(enhancementMode),e);
+  EnhancementPlan wanted;
+  wanted.superResolution=decision.superResolution;
+  wanted.scale=decision.superResolution?decision.scale:1;
+  static double enhancementChangedAt=-10;
+  if(!(wanted==enhancementPlan)){
+   if(immediate||Now()-enhancementChangedAt>1.5){
+    bool governorTookIt=enhancementPlan.superResolution&&!wanted.superResolution&&
+                        enhancementHeldFor==mediaMode.generation;
+    enhancementChangedAt=Now();
+    enhancementPlan=wanted;
+    enhancementReason=decision.reason;
+    VideoModeSetEnhancement(wanted);
+    wchar_t line[160];
+    swprintf_s(line,L"ENHANCEMENT %ls x%.2f (%ls)",wanted.superResolution?L"super resolution":L"none",wanted.scale,decision.reason);
+    Log(line);
+    // 75: silent, unless the viewer explicitly asked for it.
+    if(governorTookIt&&enhancementMode==int(EnhancementMode::On))Notify(T(S_EnhancementReduced));
+   }
+  }else enhancementReason=decision.reason;
+ }
+
+ PacingInputs in;
+ in.contentFps=playback.frameRate>0?playback.frameRate:VideoModeFacts().frameRate;
+ in.displayHz=display.refreshHz;
+ in.hasAudio=!playback.audioCodec.empty();
+ in.hardwareDecode=choice.hardwareDecode;
+ in.onBattery=powerFacts.onBattery||powerMode==2;
+ in.batterySaver=powerFacts.batterySaver;
+ in.throttled=powerFacts.throttled;
+ in.lateFramesPerMinute=lateFrameRate;
+ in.constrained=governorPolicy.tier<=GovernorTier::Constrained;
+ // Performance means the viewer has said to spend it. The machine's own limits
+ // still apply -- a throttled part is throttled whatever anyone prefers -- but
+ // battery and the Governor's caution no longer hold the plan back.
+ if(powerMode==1){in.onBattery=false;in.batterySaver=false;in.constrained=false;}
+ auto plan=PlanPacing(syncPolicy,in);
+ // A pipeline that cannot afford the good scaler does not get it, whatever the
+ // pacing plan concluded about the clock.
+ if(!choice.highQualityScaler)plan.engine.preferEfficiency=true;
+ bool changed=plan.engine.sync!=pacingPlan.engine.sync||
+  plan.engine.interpolate!=pacingPlan.engine.interpolate||
+  plan.engine.displayHz!=pacingPlan.engine.displayHz||
+  plan.engine.preferEfficiency!=pacingPlan.engine.preferEfficiency;
+ // The plan needs its own dwell, for the same reason the Governor has one and
+ // for a sharper one: display sync produces a late frame, the late frame argues
+ // for the audio clock, and the audio clock removes the late frame. Without a
+ // wait between changes that loop runs at the speed of the poll.
+ const double dwell=3.0;
+ // Learning the film's rate is not a change of mind: it is the first plan this
+ // film has ever had, and waiting out a dwell for it would leave the opening
+ // seconds paced against nothing.
+ if(pacingPlan.cadence<=0&&plan.cadence>0)immediate=true;
+ if(changed&&!immediate&&Now()-pacingChangedAt<dwell){
+  VideoModeSetStreamBudget(StreamBudgetNow());   // budgets are not pacing
+  return;
+ }
+ if(changed)pacingChangedAt=Now();
+ pacingPlan=plan;
+ VideoModeSetPacing(plan.engine);
+ VideoModeSetStreamBudget(StreamBudgetNow());
+ if(changed){
+  wchar_t line[256];
+  swprintf_s(line,L"PACING sync=%s interpolate=%d display=%.3f content=%.3f cadence=%.3f reason=%s",
+   plan.engine.sync==SyncMode::AudioClock?L"audio":
+   plan.engine.sync==SyncMode::DisplayResample?L"display-resample":L"display-vdrop",
+   plan.engine.interpolate?1:0,plan.engine.displayHz,in.contentFps,plan.cadence,plan.reason);
+  Log(line);
+ }
+}
+
+void QualitySettle(){
+ qualitySettleUntil=Now()+1.5;
+ PacingReset();
+}
+
+// The output the window is on. Composition mode leaves the engine unable to ask
+// any of this for itself, so a film that moves to another monitor is a film that
+// has to be told.
+void SyncDisplayTarget(bool force){
+ auto display=ProbeDisplay(win);
+ const auto& known=CapabilitiesNow().display;
+ if(!force&&display.refreshHz==known.refreshHz&&display.hdr==known.hdr&&
+    display.wideGamut==known.wideGamut&&display.name==known.name)return;
+ CapabilityDisplayChanged(display);
+ PacingSetBudget(display.refreshHz);
+ QualitySettle();
+ PresentationTarget target;
+ target.hdr=display.hdr;target.wideGamut=display.wideGamut;
+ target.maxNits=display.maxNits;target.minNits=display.minNits;
+ target.sdrWhiteNits=display.sdrWhiteNits;target.refreshHz=display.refreshHz;
+ VideoModeSetTarget(target);
+ ApplyPacing(true);
+ wchar_t line[256];
+ swprintf_s(line,L"DISPLAY %s %ux%u %.3f Hz %s peak=%.0f paperwhite=%.0f",
+  display.name.c_str(),display.width,display.height,display.refreshHz,
+  display.hdr?L"HDR":(display.wideGamut?L"wide-gamut":L"SDR"),display.maxNits,display.sdrWhiteNits);
+ Log(line);
+}
+
+// Four times a second: read the cheap signals, let the Governor decide, and hand
+// the decision to whoever is doing the work. Everything here costs microseconds
+// except the power read, which is held to once every two seconds.
+// ------------------------------------------------------- crash recovery ----
+// 32.2 and 43. While a film is open, which film it is and where it had got to are
+// written down every few seconds, and a clean exit removes the note. A note
+// found at the next plain start therefore means the last session did not end on
+// purpose, and the film comes back. Its position is the film's own remembered
+// state (mediastate.h), so a crash costs at most those few seconds.
+fs::path SessionCheckpointPath(){
+ wchar_t local[MAX_PATH]{};
+ fs::path base=GetEnvironmentVariableW(L"LOCALAPPDATA",local,MAX_PATH)?fs::path(local):fs::temp_directory_path();
+ std::error_code ec;
+ fs::create_directories(base/L"VetroLook",ec);
+ return base/L"VetroLook"/L"session-checkpoint.txt";
+}
+bool checkpointPresent=false;
+void ClearSessionCheckpoint(){
+ std::error_code ec;
+ fs::remove(SessionCheckpointPath(),ec);
+ checkpointPresent=false;
+}
+void CheckpointSession(double now){
+ static double next=0;
+ if(testing||navBench||preview)return;
+ if(!mediaMode.InVideo()||currentPath.empty()){
+  if(checkpointPresent)ClearSessionCheckpoint();
+  return;
+ }
+ if(now<next)return;
+ next=now+5.0;
+ auto playback=VideoModeSnapshot();
+ wchar_t position[32];
+ swprintf_s(position,L"%.3f",playback.position);
+ std::wstring text=L"VETRO-SESSION 1\n"+currentPath+L"\n"+position+L"\n"+(pictureInPicture?L"pip":L"window")+L"\n";
+ int length=WideCharToMultiByte(CP_UTF8,0,text.data(),int(text.size()),nullptr,0,nullptr,nullptr);
+ std::string utf8(size_t(length),'\0');
+ WideCharToMultiByte(CP_UTF8,0,text.data(),int(text.size()),utf8.data(),length,nullptr,nullptr);
+ auto path=SessionCheckpointPath();
+ auto temporary=path;temporary+=L".tmp";
+ {
+  std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
+  out.write(utf8.data(),std::streamsize(utf8.size()));
+  if(!out)return;
+ }
+ if(MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING))checkpointPresent=true;
+}
+// Called at a plain start. True when a film was brought back.
+bool RestoreSession(){
+ std::ifstream in(SessionCheckpointPath(),std::ios::binary);
+ if(!in)return false;
+ std::string utf8((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+ in.close();
+ int length=MultiByteToWideChar(CP_UTF8,0,utf8.data(),int(utf8.size()),nullptr,0);
+ std::wstring text(size_t(length),L'\0');
+ MultiByteToWideChar(CP_UTF8,0,utf8.data(),int(utf8.size()),text.data(),length);
+ std::vector<std::wstring> lines;
+ for(size_t at=0;at<text.size();){
+  auto end=text.find(L'\n',at);
+  if(end==std::wstring::npos)end=text.size();
+  lines.push_back(text.substr(at,end-at));
+  at=end+1;
+ }
+ // A note from a session that did not finish is used once: if reopening this
+ // film is what brings the viewer down, it must not happen on every start.
+ ClearSessionCheckpoint();
+ if(lines.size()<2||lines[0]!=L"VETRO-SESSION 1"||lines[1].empty())return false;
+ const std::wstring& film=lines[1];
+ std::error_code ec;
+ bool address=LooksLikeUrl(film);
+ if(!address&&!fs::exists(fs::path(film),ec))return false;
+ Log(L"session restore after an unexpected exit: "+film);
+ navStack.clear();
+ if(!address){
+  auto parent=fs::path(film).parent_path().wstring();
+  navStack.push_back({ScrLibrary,L"",0,0});
+  navStack.push_back({ScrAlbum,parent,0,0});
+ }
+ Open(film);
+ Notify(T(S_SessionRestored));
+ return true;
+}
+
+void QualityPoll(){
+ static double nextPoll=0,nextPowerPoll=0,lastPoll=0;
+ static PlaybackSnapshot previous;
+ static HMONITOR lastMonitor=nullptr;
+ double now=Now();
+ if(now<nextPoll)return;
+ double interval=lastPoll>0?now-lastPoll:0.25;
+ lastPoll=now;nextPoll=now+0.25;
+ CheckpointSession(now);
+ memoryFacts=ReadMemory(GfxD3DDevice());
+ if(now>=nextPowerPoll){nextPowerPoll=now+2.0;powerFacts=ReadPower();}
+ // A window dragged to another screen is a different display, and the cheap
+ // check for that is the monitor handle rather than a fresh probe.
+ HMONITOR monitor=MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST);
+ if(monitor!=lastMonitor){lastMonitor=monitor;SyncDisplayTarget(true);}
+
+ auto playback=mediaMode.InVideo()?VideoModeSnapshot():PlaybackSnapshot{};
+ GovernorSample sample;
+ sample.now=now;sample.interval=interval;
+ sample.playing=playback.hasVideo&&!playback.paused;
+ sample.windowHidden=IsIconic(win)||!IsWindowVisible(win);
+ sample.frameBudgetMs=PacingBudgetMs();
+ // During a settle the margin is reported as the whole interval: unmeasured, not
+ // comfortable. Either way it contributes no pressure.
+ sample.deadlineMarginMs=now<qualitySettleUntil?sample.frameBudgetMs:PacingDeadlineMargin();
+ auto delta=[](int64_t current,int64_t before){return int((std::max)(int64_t(0),current-before));};
+ sample.lateFrames=delta(playback.delayedFrames,previous.delayedFrames);
+ sample.droppedFrames=delta(playback.droppedFrames,previous.droppedFrames);
+ sample.decoderDrops=delta(playback.decoderDrops,previous.decoderDrops);
+ sample.avSyncError=playback.avSync;
+ sample.ramPressure=memoryFacts.ramPressure;
+ sample.vramPressure=memoryFacts.vramPressure;
+ sample.onBattery=powerFacts.onBattery||powerMode==2;
+ sample.batterySaver=powerFacts.batterySaver;
+ sample.throttled=powerFacts.throttled;
+ if(powerMode==1){sample.onBattery=false;sample.batterySaver=false;}
+ previous=playback;
+ // Sustained, not instantaneous: one late frame while a window was dragged is
+ // not a reason to change how a film is paced.
+ double rate=interval>0.01?double(sample.lateFrames)/interval*60.0:0;
+ // Slow to forget on purpose: a burst of late frames should still be visible in
+ // this number several seconds later, or the plan that caused it comes straight
+ // back.
+ lateFrameRate=lateFrameRate*0.9+rate*0.1;
+
+ auto& governor=TheGovernor();
+ GovernorTier before=governor.CurrentTier();
+ governor.Observe(sample);
+ governorPolicy=governor.Policy();
+ IndexSetPaused(!governorPolicy.backgroundIndexing);
+ // The preview engine is secondary work by construction (12.3, P2), so it is
+ // told what it may spend rather than deciding for itself. Cached frames keep
+ // showing even when new decoding is not allowed.
+ PreviewSetPolicy(governorPolicy.previewGeneration,governorPolicy.previewScale,
+                  governorPolicy.previewCoalesceMs);
+ PreviewSetMemoryBudget(governorPolicy.tier<=GovernorTier::Constrained?(8u<<20):(32u<<20));
+ // Transcription is secondary work too (Prototype G): it waits, the film does not.
+ AiSetAllowed(governorPolicy.aiTranscription);
+ if(governor.CurrentTier()!=before){
+  Log(governor.Explain());
+  Wake();                 // the glass may have just been given up
+ }
+ if(mediaMode.InVideo())ApplyPacing();
+
+ // What Windows shows about us. Cheap: each setter compares against what was
+ // last pushed, and the position is only sent once a second.
+ if(mediaMode.InVideo()&&playback.opened){
+  SmtcSetMedia(fs::path(currentPath).filename().wstring(),
+               fs::path(currentPath).parent_path().filename().wstring());
+  SmtcSetPlaying(!playback.paused,true);
+  SmtcSetTimeline(playback.position,playback.duration);
+  SmtcSetNeighbours(siblings.size()>1,siblings.size()>1);
+ }else SmtcSetPlaying(false,false);
 }
 
 // ---------------------------------------------------------------- tick -----
@@ -3446,8 +4434,10 @@ bool Tick(float dt){
   {std::lock_guard lock(cacheMx);CacheTrimLocked(NormalisePath(currentPath),false);}
   CacheLogTelemetry();
  }
+ QualityPoll();
  if(fastNavigation&&Now()>=fastNavigationUntil)fastNavigation=false;
  busy|=chrome.Step(dt);
+ if(mediaMode.InVideo())busy|=VideoModeStep(dt);
  busy|=StepWindow(dt);
  busy|=themeMix.Step(dt);
  busy|=wheelMix.Step(dt);
@@ -3647,6 +4637,7 @@ void Command(int id){
   std::wstring failure;
   if(RegisterAsViewer(failure)){OpenDefaultAppsPage();Notify(T(S_DefaultDone));}
   else Notify(T(S_DefaultFailed));
+  viewerRegistered=ViewerRegistered();
   ClosePanel();return;
  }
  case IdSpacePreview:{
@@ -3681,6 +4672,80 @@ void Command(int id){
   tcStatus=TotalCommanderStatus();
   if(!note.empty())Notify(note);
   Wake();return;
+ }
+ // Three states in one row: tapping moves to the next, which is what a row
+ // with a value on its right is for. Both choices are the viewer's and both
+ // outlive the session.
+ case IdSyncRow:{
+  syncPolicy=SyncPolicy(((int(syncPolicy)+1)%3));
+  DWORD value=DWORD(syncPolicy);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PlaybackSync",REG_DWORD,&value,sizeof(value));
+  ApplyPacing(true);Wake();return;
+ }
+ case IdPowerRow:{
+  powerMode=(powerMode+1)%3;
+  DWORD value=DWORD(powerMode);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PowerMode",REG_DWORD,&value,sizeof(value));
+  ApplyPacing(true);Wake();return;
+ }
+ case IdSeekStep:{
+  seekStepSeconds=seekStepSeconds<7.5?10.0:5.0;
+  DWORD value=DWORD(seekStepSeconds);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"SeekStep",REG_DWORD,&value,sizeof(value));
+  Wake();return;
+ }
+ case IdAiModel:{
+  // One row, three meanings, each the obvious next step: cancel what is
+  // arriving, take back what is here, or fetch what is missing.
+  if(AiStatusNow().state==AiState::Downloading){AiModelDownloadCancel();Wake();return;}
+  if(AiInstalled()){
+   if(VideoModeAiSubtitles())VideoModeToggleAiSubtitles();
+   if(AiModelRemove())Notify(T(S_AiRemoved));
+   Wake();return;
+  }
+  AiModelDownload(win,AiProgress);
+  Notify(T(S_AiDownloading));
+  Wake();return;
+ }
+ case IdEnhancement:{
+  enhancementMode=(enhancementMode+1)%3;
+  DWORD value=DWORD(enhancementMode);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Enhancement",REG_DWORD,&value,sizeof(value));
+  // A deliberate choice clears the governor's hold: the viewer has asked again.
+  enhancementHeldFor=0;
+  ApplyPacing(true);Wake();return;
+ }
+ case IdAiLanguage:{
+  aiLanguage=(aiLanguage+1)%3;
+  DWORD value=DWORD(aiLanguage);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"AiLanguage",REG_DWORD,&value,sizeof(value));
+  AiSetLanguage(AiLanguageCode());
+  Wake();return;
+ }
+ case IdSilenceSkip:{
+  int next=(int(VideoModeSilenceSkip())+1)%3;
+  VideoModeSetSilenceSkip(SilenceSkip(next));
+  DWORD value=DWORD(next);
+  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"SilenceSkip",REG_DWORD,&value,sizeof(value));
+  Wake();return;
+ }
+ case IdDiagnostics:{
+  auto text=DiagnosticsText();
+  Log(L"DIAGNOSTICS\n"+text);
+  if(OpenClipboard(win)){
+   size_t bytes=(text.size()+1)*sizeof(wchar_t);
+   HANDLE data=GlobalAlloc(GMEM_MOVEABLE,bytes);
+   if(data){
+    void* target=GlobalLock(data);
+    if(target){
+     memcpy(target,text.c_str(),bytes);GlobalUnlock(data);
+     EmptyClipboard();
+     if(!SetClipboardData(CF_UNICODETEXT,data))GlobalFree(data);
+    }else GlobalFree(data);
+   }
+   CloseClipboard();
+  }
+  Notify(T(S_DiagnosticsCopied));return;
  }
  case IdLanguage:menuLevel=1;levelSlide.Reset(0);levelSlide.To(1);Wake();return;
  case IdLangBack:menuLevel=0;levelSlide.Reset(1);levelSlide.To(0);Wake();return;
@@ -4504,9 +5569,33 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   if(p.y<(Margin+Bubble)*dpi&&HitTest(p.x/dpi,p.y/dpi)==IdNone)return HTCAPTION;
   return HTCLIENT;
  }
+ case WM_SIZING:{
+  // The window keeps the film's shape while it is being resized. Whichever
+  // edge the hand is on is the one that leads; the other follows.
+  if(!mediaMode.InVideo()||videoAspect<=0||preview)return TRUE;
+  auto r=(RECT*)lp;
+  double w=double(r->right-r->left),h=double(r->bottom-r->top);
+  bool horizontal=wp==WMSZ_LEFT||wp==WMSZ_RIGHT;
+  bool vertical=wp==WMSZ_TOP||wp==WMSZ_BOTTOM;
+  if(horizontal)h=w/videoAspect;
+  else if(vertical)w=h*videoAspect;
+  else{
+   // A corner: follow whichever dimension moved further from the aspect.
+   double fromWidth=fabs(h-w/videoAspect),fromHeight=fabs(w-h*videoAspect);
+   if(fromWidth<fromHeight)h=w/videoAspect;else w=h*videoAspect;
+  }
+  if(wp==WMSZ_LEFT||wp==WMSZ_TOPLEFT||wp==WMSZ_BOTTOMLEFT)r->left=r->right-LONG(w+.5);
+  else r->right=r->left+LONG(w+.5);
+  if(wp==WMSZ_TOP||wp==WMSZ_TOPLEFT||wp==WMSZ_TOPRIGHT)r->top=r->bottom-LONG(h+.5);
+  else r->bottom=r->top+LONG(h+.5);
+  return TRUE;
+ }
  case WM_GETMINMAXINFO:{
   auto mm=(MINMAXINFO*)lp;
-  mm->ptMinTrackSize=preview?POINT{60,60}:POINT{LONG(760*dpi),LONG(500*dpi)};
+  // A film decides how small the window may be: a tall phone recording in a
+  // window that must stay 760 wide would be a window of empty sides.
+  if(mediaMode.InVideo()&&!preview)mm->ptMinTrackSize=POINT{LONG(320*dpi),LONG(220*dpi)};
+  else mm->ptMinTrackSize=preview?POINT{60,60}:POINT{LONG(760*dpi),LONG(500*dpi)};
   MONITORINFO monitor{sizeof(monitor)};
   if(GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor)){
    mm->ptMaxPosition={monitor.rcWork.left-monitor.rcMonitor.left,monitor.rcWork.top-monitor.rcMonitor.top};
@@ -4514,12 +5603,19 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   }
   return 0;
  }
+ case WM_DISPLAYCHANGE:
+  // A mode change, a monitor arriving, HDR being switched on: all of it lands
+  // here, and all of it changes how a film should be presented.
+  SyncDisplayTarget(true);
+  Wake();return 0;
  case WM_DPICHANGED:{
   dpi=HIWORD(wp)/96.f;
   auto r=(RECT*)lp;
   SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER);
   RECT client;GetClientRect(hwnd,&client);
   GfxResize(client.right,client.bottom,dpi);
+  SyncVideoSurface();
+  SyncDisplayTarget(true);
   if(fit)Fit();
   Wake();return 0;
  }
@@ -4527,6 +5623,8 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   RECT r;GetClientRect(hwnd,&r);
   GfxResize(r.right,r.bottom,dpi);
   ApplyCorners();
+  SyncVideoSurface();
+  QualitySettle();
   // While our own maximise/restore animation is interpolating the window
   // rect, let the fit-zoom spring chase the moving target smoothly; snapping
   // it on every intermediate WM_SIZE is what produced the old jump-cut.
@@ -4546,6 +5644,25 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   {
    std::lock_guard lock(mx);
    if(!ready.empty()){result=std::move(ready.front());ready.pop_front();}
+  }
+  if(result&&result->id==latest&&result->listOnly){
+   // Video Mode's folder listing. It touches the filmstrip and nothing else:
+   // the frame on screen belongs to the other mode, or to no mode at all.
+   if(!result->files.empty()||!preview)siblings=std::move(result->files);
+   SyncGallery();ThumbTrim(siblings);Wake();
+   return 0;
+  }
+  if(result&&result->id==latest&&result->reroute!=MediaKind::Unsupported&&
+     rerouting==MediaKind::Unsupported){
+   // The name said photograph, the bytes said film. Re-open once, in the mode
+   // the bytes call for, and remember that this was the second attempt.
+   auto kind=result->reroute;auto path=result->path;
+   if(!result->files.empty())siblings=std::move(result->files);
+   rerouting=kind;
+   Log(L"rerouted to video "+path);
+   Open(path,false,kind);
+   rerouting=MediaKind::Unsupported;
+   return 0;
   }
   if(result&&result->id==latest){
    auto shown=current;
@@ -4579,10 +5696,104 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
      hero.left.To((w-current->w*scale)*.5f);hero.right.To((w+current->w*scale)*.5f);
      hero.top.To((h-current->h*scale)*.5f);hero.bottom.To((h+current->h*scale)*.5f);}
    }
+   if(current)mediaMode.Ready();else mediaMode.Failed();
    Log(current?L"Opened "+currentPath:L"Open failed "+currentPath);
    Wake();
   }
   return 0;
+ }
+ case VideoReady:{
+  if(!mediaMode.InVideo())return 0;
+  // Two senders, one message: the engine's wake-up and the poster worker's
+  // result. Both are cheap to ask about and neither blocks.
+  VideoModePump();
+  // Shell facts arrive independently from mpv. Collect them before deciding
+  // the geometry: the frame dimensions in those facts are a reliable fallback
+  // when a composition renderer delays its property notification.
+  bool collectedFacts=VideoModeCollect(mediaMode.generation);
+  auto playback=VideoModeSnapshot();
+  const auto& videoFacts=VideoModeFacts();
+  if(playback.hasVideo&&mediaMode.state==ModeState::VideoPreparing)mediaMode.Ready();
+  // Resume, announced rather than silent: a film that starts in the middle
+  // without saying so reads as a bug (10.2).
+  double resumedAt=0;
+  if(VideoModeResumed(resumedAt))Notify(T(S_Resumed)+std::wstring(L" ")+FormatDuration(resumedAt));
+  std::wstring streamNotice;
+  if(VideoModeTakeStreamNotice(streamNotice)){Notify(streamNotice);Log(L"stream: "+streamNotice);}
+  // The queue: at the end of one film the folder's next film follows, the same
+  // order the filmstrip shows. Once per ending, never in a loop.
+  static uint64_t advancedFor=0;
+  if(playback.endReached&&mediaMode.generation!=advancedFor&&!VideoModeLoopActive()){
+   advancedFor=mediaMode.generation;
+   int index=CurrentIndex();
+   if(index>=0&&siblings.size()>1){
+    for(size_t step=1;step<siblings.size();step++){
+     size_t candidate=(size_t(index)+step)%siblings.size();
+     if(KindFromExtension(siblings[candidate])==MediaKind::Video){
+      Log(L"queue advancing to "+siblings[candidate]);
+      Open(siblings[candidate]);
+      break;
+     }
+    }
+   }
+  }
+  // The first time this film says how large it is, the window takes its shape.
+  unsigned frameWidth=playback.width?playback.width:videoFacts.width;
+  unsigned frameHeight=playback.height?playback.height:videoFacts.height;
+  if(frameWidth&&frameHeight&&
+     (frameWidth!=shapedWidth||frameHeight!=shapedHeight)){
+   shapedWidth=frameWidth;shapedHeight=frameHeight;
+   FitWindowToVideo(frameWidth,frameHeight);
+   QualitySettle();
+  }
+  errorText=VideoModeError();
+  // The engine wakes this window whenever anything it observes changes, and the
+  // clock changes constantly. Repainting on each of those would redraw the whole
+  // interface sixty times a second to move a second hand: a frame is asked for
+  // only when something that is actually on screen has moved.
+  static PlaybackSnapshot painted;
+  bool controlsVisible=chrome.v>.01f&&screen==ScrViewer&&!preview;
+  bool changed=playback.paused!=painted.paused||playback.duration!=painted.duration||
+   playback.muted!=painted.muted||playback.volume!=painted.volume||
+   playback.endReached!=painted.endReached||playback.seeking!=painted.seeking||
+   playback.width!=painted.width||playback.height!=painted.height||
+   playback.opened!=painted.opened||playback.hasVideo!=painted.hasVideo||
+   playback.error!=painted.error||
+   (controlsVisible&&fabs(playback.position-painted.position)>.2);
+  if(changed)painted=playback;
+  // Playback timing, for the record. Stage three's frame pacing will be measured
+  // against these numbers, and Diagnostics will show them; until then they are
+  // written where a benchmark run can find them.
+  if(testing||GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0)){
+   static double nextReport=0;
+   if(playback.hasVideo&&Now()>=nextReport){
+    nextReport=Now()+5.0;
+    wchar_t line[256];
+    auto frames=PacingUiStats();
+    swprintf_s(line,L"PLAYBACK renderer=%s hwdec=%s sync=%s fps=%.2f dropped=%lld decdrop=%lld late=%lld "
+     L"avsync=%.3f jitter=%.4f tier=%d margin=%.2f ui_p95=%.2f pos=%.1f",
+     playback.renderer.c_str(),playback.hwdec.c_str(),
+     playback.syncMode.empty()?L"default":playback.syncMode.c_str(),playback.displayFps,
+     (long long)playback.droppedFrames,(long long)playback.decoderDrops,
+     (long long)playback.delayedFrames,playback.avSync,playback.vsyncJitter,
+     int(governorPolicy.tier),PacingDeadlineMargin(),frames.p95,playback.position);
+    Log(line);
+   }
+  }
+  if(!collectedFacts){if(changed)Wake();return 0;}
+  currentRoute=VideoModeRoute();
+  // The other direction of the same mistake: a photograph named `.mp4`. Image
+  // Mode owns it, so hand it over and let the decode ladder have it.
+  if(currentRoute.IsImage()&&rerouting==MediaKind::Unsupported){
+   auto path=currentPath;
+   rerouting=MediaKind::Image;
+   Log(L"rerouted to image "+path);
+   Open(path,false,MediaKind::Image);
+   rerouting=MediaKind::Unsupported;
+   return 0;
+  }
+  if(VideoModeHasPoster())mediaMode.Ready();
+  Wake();return 0;
  }
  case MetaReady:{
   Meta fresh;
@@ -4601,7 +5812,10 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   return 0;
  }
  case ThumbReady:{
-  if(screen==ScrViewer&&(!current||(showingPreview&&current->w<=180))){
+  // Only Image Mode adopts a thumbnail as the frame on screen. In Video Mode the
+  // tile is the film's poster, and treating it as the current photograph would
+  // hand the shell a still that the film is already replacing.
+  if(screen==ScrViewer&&!mediaMode.InVideo()&&(!current||(showingPreview&&current->w<=180))){
    auto thumb=ThumbLookup(currentPath);
    if(thumb&&thumb!=current){
     current=thumb;currentFrameKey=NormalisePath(currentPath)+L"|thumb";backdropSource=thumb;
@@ -4623,6 +5837,68 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    NormalWindow();Open((wchar_t*)cd->lpData);return TRUE;
   }
   break;
+ }
+ case WM_EXITSIZEMOVE:
+  // 33.4: a PiP let go near a corner settles into it, at the same margin it was
+  // opened with; one let go anywhere else stays exactly where it was put.
+  if(pictureInPicture){
+   RECT r{};GetWindowRect(win,&r);
+   MONITORINFO info{};info.cbSize=sizeof info;
+   if(GetMonitorInfoW(MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST),&info)){
+    const RECT& work=info.rcWork;
+    int margin=int(24*dpi),reach=int(40*dpi);
+    int w=r.right-r.left,h=r.bottom-r.top,x=r.left,y=r.top;
+    if(abs(r.left-(work.left+margin))<reach)x=work.left+margin;
+    else if(abs((work.right-margin)-r.right)<reach)x=work.right-margin-w;
+    if(abs(r.top-(work.top+margin))<reach)y=work.top+margin;
+    else if(abs((work.bottom-margin)-r.bottom)<reach)y=work.bottom-margin-h;
+    if(x!=r.left||y!=r.top)SetWindowPos(win,nullptr,x,y,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+   }
+   SavePipGeometry();
+  }
+  return 0;
+ case AiProgress:{
+  if(wp==2){
+   auto error=AiStatusNow().error;
+   if(lp)Notify(T(S_AiReady));
+   else if(error!=L"cancelled"){Notify(T(S_AiDownloadFailed));Log(L"ai model download: "+error);}
+  }
+  if(panel==PanelMenu||wp==2)Wake();
+  return 0;
+ }
+ case StreamResolved:{
+  ResolveOutcome outcome;
+  if(!ResolverCollect(outcome)||outcome.generation!=resolveGeneration)return 0;
+  auto page=resolvingAddress;resolvingAddress.clear();
+  wchar_t took[32];swprintf_s(took,L"%.1f",outcome.seconds);
+  if(!outcome.ok){
+   Log(L"resolver: "+std::wstring(StreamFailureName(outcome.failure))+L" after "+took+L" s: "+outcome.detail);
+   if(outcome.failure!=StreamFailure::None)Notify(VideoModeFailureText(outcome.failure));
+   return 0;
+  }
+  Log(L"resolver: "+page+L" -> "+(outcome.stream.live?L"live, ":L"")+
+      (outcome.stream.audio.empty()?L"one stream":L"video and audio")+L" in "+took+L" s");
+  OpenOptions options;
+  options.audioUrl=outcome.stream.audio;
+  options.title=outcome.stream.title;
+  options.userAgent=outcome.stream.userAgent;
+  options.referrer=outcome.stream.referrer;
+  options.live=outcome.stream.live;
+  PlayStream(page,outcome.stream.video,options,L"Web page");
+  return 0;
+ }
+ case SystemTransport:{
+  // The keyboard's media keys, the lock screen, another application asking for
+  // the speakers. The same actions the viewer's own transport performs.
+  if(!mediaMode.InVideo())return 0;
+  switch(wp){
+   case SmtcPlay:case SmtcPause:case SmtcToggle:VideoModeTogglePlay();break;
+   case SmtcStop:VideoModeTogglePlay();break;
+   case SmtcNext:Navigate(1);break;
+   case SmtcPrevious:Navigate(-1);break;
+   default:break;
+  }
+  Wake();return 0;
  }
  case ActivateNormal:NormalWindow();return 0;
  case Preview:
@@ -4681,7 +5957,112 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   if(control&&wp=='S'){Save(shift);return 0;}
   if(control&&wp=='C'){CopyCurrent();return 0;}
   if(control&&wp=='O'){Choose();return 0;}
+  // An address on the clipboard is the whole of "open URL" for a viewer with no
+  // address bar: copy a link, press paste, watch it (9.2).
+  if(control&&wp=='V'){
+   std::wstring pasted;
+   if(OpenClipboard(win)){
+    if(HANDLE data=GetClipboardData(CF_UNICODETEXT)){
+     if(const wchar_t* text=(const wchar_t*)GlobalLock(data)){
+      pasted.assign(text,wcsnlen(text,4096));
+      GlobalUnlock(data);
+     }
+    }
+    CloseClipboard();
+   }
+   while(!pasted.empty()&&(pasted.back()==L'\r'||pasted.back()==L'\n'||pasted.back()==L' '))pasted.pop_back();
+   if(LooksLikeUrl(pasted))OpenStream(pasted);
+   else Notify(T(S_NoAddress));
+   return 0;
+  }
+  // With VETRO_DEBUG set, F12 writes Diagnostics to the session log without
+  // going through the menu -- what a scripted network test needs. Off otherwise.
+  if(wp==VK_F12&&GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0)){Command(IdDiagnostics);return 0;}
+  // F9 presses the AI subtitles download row, for the same reason.
+  if(wp==VK_F9&&GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0)){Command(IdAiModel);return 0;}
+  // And F11 exports the generated subtitles, which a script cannot reach with a
+  // posted Shift+A: posted keys carry no modifier state.
+  if(wp==VK_F11&&GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0)&&mediaMode.InVideo()){
+   auto written=VideoModeAiExport();
+   Log(written.empty()?std::wstring(L"ai export: nothing to export"):L"ai export "+written);
+   return 0;
+  }
   if(control&&wp=='Z'){Command(IdUndo);return 0;}
+  // Video Mode takes the arrows for the timeline and Space for playback, and
+  // hands neighbour navigation to Ctrl+arrow. Image Mode keeps the arrows for
+  // the folder, which is what they have always meant there.
+  if(mediaMode.InVideo()&&!control){
+   if(wp==VK_SPACE){VideoModeTogglePlay();Wake();return 0;}
+   // Shift turns the arrows into a frame step (21.1), and the comma and full
+   // stop do the same thing on their own -- the keys every other player in the
+   // world uses for it, and the ones a hand already on the keyboard finds.
+   // The film pauses itself: one still running under a frame step is not
+   // stepping.
+   if(wp==VK_OEM_PERIOD){VideoModeStepFrame(1);Wake();return 0;}
+   if(wp==VK_OEM_COMMA){VideoModeStepFrame(-1);Wake();return 0;}
+   // Chapters, where the film has them. Page keys, because that is what they
+   // mean everywhere else: one section forward, one section back.
+   if(wp==VK_NEXT||wp==VK_PRIOR){
+    std::wstring title;
+    if(VideoModeJumpChapter(wp==VK_NEXT?1:-1,title))Notify(T(S_Chapter)+std::wstring(L" ")+title);
+    else Notify(T(S_NoChapters));
+    Wake();return 0;
+   }
+   // Subtitle and audio delay, in tenths of a second. The nudge belongs to the
+   // film and comes back with it.
+   if(wp=='Z'){
+    VideoModeAdjustSubtitleDelay(shift?0.1:-0.1);
+    Notify(DelayNote(T(S_SubtitleDelay),VideoModeSubtitleDelay()));Wake();return 0;
+   }
+   if(wp=='X'){
+    VideoModeAdjustAudioDelay(shift?0.1:-0.1);
+    Notify(DelayNote(T(S_AudioDelay),VideoModeAudioDelay()));Wake();return 0;
+   }
+   if(wp=='S'&&!control){
+    auto written=VideoModeScreenshot();
+    Notify(written.empty()?T(S_Unavailable):T(S_FrameSaved));
+    if(!written.empty())Log(L"screenshot "+written);
+    Wake();return 0;
+   }
+   if(wp=='L'){
+    int stateNow=VideoModeToggleLoopPoint();
+    Notify(stateNow==1?T(S_LoopFrom):stateNow==2?T(S_LoopSet):T(S_LoopOff));
+    Wake();return 0;
+   }
+   if(wp=='P'){TogglePictureInPicture();return 0;}
+   // 33.2: pin and unpin picture in picture. Remembered with its position.
+   if(wp=='T'&&pictureInPicture){
+    pipPinned=!pipPinned;
+    SetWindowPos(win,pipPinned?HWND_TOPMOST:HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+    SavePipGeometry();
+    Notify(T(pipPinned?S_PipPinned:S_PipUnpinned));
+    Wake();return 0;
+   }
+   // AI subtitles (27.1): A turns them on and off; Shift+A writes what has been
+   // generated beside the film -- the only time its folder is written to (27.11).
+   if(wp=='A'){
+    if(shift){
+     auto written=VideoModeAiExport();
+     Notify(written.empty()?T(S_AiNothingToExport):T(S_AiExported));
+     if(!written.empty())Log(L"ai export "+written);
+     Wake();return 0;
+    }
+    if(!VideoModeAiAvailableHere()){Notify(T(S_AiUnavailable));return 0;}
+    if(!AiInstalled()){Notify(T(S_AiNeedsModel));return 0;}
+    Notify(VideoModeToggleAiSubtitles()?T(S_AiOn):T(S_AiOff));
+    Wake();return 0;
+   }
+   // End is the live edge on a live stream, where "the end" is exactly that.
+   if(wp==VK_END&&VideoModeJumpToLive()){Notify(T(S_LiveEdge));Wake();return 0;}
+   if(wp==VK_RIGHT){
+    if(shift)VideoModeStepFrame(1);else VideoModeSeekBy(seekStepSeconds);
+    Wake();return 0;
+   }
+   if(wp==VK_LEFT){
+    if(shift)VideoModeStepFrame(-1);else VideoModeSeekBy(-seekStepSeconds);
+    Wake();return 0;
+   }
+  }
   if(wp==VK_RIGHT)Navigate(1);
   else if(wp==VK_LEFT)Navigate(-1);
   else if(wp=='0')Fit();
@@ -4745,11 +6126,18 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  case WM_LBUTTONDOWN:
   if(preview){SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;}
   mouse={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+  // The transport bar is Video Mode's own surface, so it answers first. A click
+  // anywhere else goes to the shell, which owns everything around the film.
+  if(screen==ScrViewer&&mediaMode.InVideo()&&
+     VideoModePointerDown(mouse.x/dpi,mouse.y/dpi)){
+   SetCapture(hwnd);lastInteraction=Now();Wake();return 0;
+  }
   if(screen!=ScrViewer)LibraryMouseDown(mouse.x/dpi,mouse.y/dpi);else MouseDown(mouse.x/dpi,mouse.y/dpi);
   Wake();return 0;
  case WM_MOUSEMOVE:{
   if(preview)return 0;
   POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+  if(screen==ScrViewer&&mediaMode.InVideo())VideoModePointerMove(p.x/dpi,p.y/dpi);
   if(screen!=ScrViewer)LibraryMouseMove(p.x/dpi,p.y/dpi);else MouseMove(p.x/dpi,p.y/dpi);
   mouse=p;
   TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};
@@ -4761,6 +6149,10 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   return 0;
  case WM_LBUTTONUP:
   if(preview)return 0;
+  if(screen==ScrViewer&&mediaMode.InVideo()){
+   VideoModePointerUp(GET_X_LPARAM(lp)/dpi,GET_Y_LPARAM(lp)/dpi);
+   if(GetCapture()==hwnd)ReleaseCapture();
+  }
   if(screen!=ScrViewer)LibraryMouseUp(GET_X_LPARAM(lp)/dpi,GET_Y_LPARAM(lp)/dpi);else MouseUp(GET_X_LPARAM(lp)/dpi,GET_Y_LPARAM(lp)/dpi);
   Wake();return 0;
  case WM_CAPTURECHANGED:dragImage=false;galleryDragging=false;sliderGrab=false;return 0;
@@ -4794,6 +6186,17 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   OpenExternal(p);return 0;
  }
  case WM_TIMER:
+  if(wp==9){
+   if(!mediaMode.InVideo()||!VideoModeRoute().IsUrl())return 0;
+   bool started=VideoModeNetworkTick();
+   if(started)Log(L"stream: reconnect attempt");
+   std::wstring notice;
+   bool noticed=VideoModeTakeStreamNotice(notice);
+   if(noticed){Notify(notice);Log(L"stream: "+notice);}
+   auto error=VideoModeError();
+   if(started||noticed||error!=errorText){errorText=error;Wake();}
+   return 0;
+  }
   if(wp==2){TestTick();return 0;}
   if(wp==7){NavBenchTick();return 0;}
   if(wp==5){
@@ -4810,7 +6213,11 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    return 0;
   }
   if(wp==3){
-   if(!preview&&screen==ScrViewer){chrome.To(current&&panel==PanelNone&&tool==ToolNone&&!dragImage&&!loading&&Now()-lastInteraction>3.0?0.f:1.f);if(chrome.Moving())Wake();}
+   if(!preview&&screen==ScrViewer){
+    bool watching=current!=nullptr||mediaMode.InVideo();
+    chrome.To(watching&&panel==PanelNone&&tool==ToolNone&&!dragImage&&!loading&&Now()-lastInteraction>3.0?0.f:1.f);
+    if(chrome.Moving())Wake();
+   }
    else if(!preview&&chrome.target<1.f){chrome.To(1.f);}
    if(preview&&GetForegroundWindow()==explorer&&ExplorerCanPreview(explorer)){
     auto p=ExplorerSelection(explorer);
@@ -4867,6 +6274,36 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  stored=0;size=sizeof(stored);
  RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"WheelMode",RRF_RT_REG_DWORD,nullptr,&stored,&size);
  wheelMode=int(stored)?1:0;wheelMix.Reset(float(wheelMode));
+ // Playback synchronization and power behaviour (11.3, 74). Both default to Auto,
+ // which is the only value most people will ever have.
+ stored=0;size=sizeof(stored);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PlaybackSync",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ syncPolicy=stored<=2?SyncPolicy(stored):SyncPolicy::Auto;
+ stored=0;size=sizeof(stored);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"PowerMode",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ powerMode=stored<=2?int(stored):0;
+ stored=0;size=sizeof(stored);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"SeekStep",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ seekStepSeconds=stored==5?5.0:10.0;
+ {
+  DWORD value=0,valueSize=sizeof(value);
+  if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"AiLanguage",RRF_RT_REG_DWORD,nullptr,&value,&valueSize)==ERROR_SUCCESS&&value<3)
+   aiLanguage=int(value);
+  value=0;valueSize=sizeof(value);
+  if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"SilenceSkip",RRF_RT_REG_DWORD,nullptr,&value,&valueSize)==ERROR_SUCCESS&&value<3)
+   VideoModeSetSilenceSkip(SilenceSkip(value));
+  AiSetLanguage(AiLanguageCode());
+  value=1;valueSize=sizeof(value);
+  if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Enhancement",RRF_RT_REG_DWORD,nullptr,&value,&valueSize)==ERROR_SUCCESS&&value<3)
+   enhancementMode=int(value);
+ }
+ // Exclusive audio has no row in the menu on purpose: it silences everything
+ // else on the machine, and a switch that does that should be looked for
+ // rather than found by accident. AudioExclusive=1 under the settings key
+ // turns it on.
+ stored=0;size=sizeof(stored);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"AudioExclusive",RRF_RT_REG_DWORD,nullptr,&stored,&size);
+ PlaybackSetAudioExclusive(stored!=0);
  // Library view. Absent the setting — a first run, or a reset profile — this
  // is the timeline; a value only exists once somebody chose Folders (or chose
  // to go back to the timeline) for themselves.
@@ -4915,6 +6352,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  // --nav-bench has already opened the log; reopening an open wofstream sets
  // failbit and silently discards every line that follows.
  if(testing&&!navBench){logFile.open(fs::path(argv[2]));for(int i=3;i<argc;i++)testFiles.push_back(argv[i]);}
+ // With VETRO_DEBUG set, the session keeps the same log the test runs write, in
+ // the temporary directory. It is the only way to read playback timing on a
+ // machine with no console attached, which is every ordinary run of a windowed
+ // application.
+ if(!logFile.is_open()&&GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0)){
+  wchar_t temp[MAX_PATH]{};
+  if(GetTempPathW(MAX_PATH,temp))logFile.open(fs::path(std::wstring(temp)+L"vetro-session.log"));
+ }
  // Opening a file always gets its own window: launching a second photo while
  // one is already showing must not disturb it, so that case falls through
  // and lets this process create a window of its own instead of forwarding
@@ -4952,9 +6397,21 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  // (minimise, etc.) still get the system's own animation.
  BOOL noTransition=TRUE;DwmSetWindowAttribute(win,DWMWA_TRANSITIONS_FORCEDISABLED,&noTransition,sizeof(noTransition));
  SetTimer(win,5,180,nullptr);
+ // The network clock. A stalled stream draws no frames and wakes nobody, so the
+ // reconnect watchdog cannot ride on the render loop's poll (Appendix G).
+ SetTimer(win,9,250,nullptr);
  ApplyCorners();
  if(!GfxCreate(win,dpi))return 2;
  DragAcceptFiles(win,TRUE);
+ // What this machine is, before anything asks it to do work. The probe needs the
+ // Direct3D device, so it waits for the renderer; everything after it -- the
+ // pacing plan, the memory budgets, the Governor -- reads its answer instead of
+ // asking Windows again.
+ CapabilityProbe(GfxD3DDevice(),win);
+ powerFacts=ReadPower();
+ memoryFacts=ReadMemory(GfxD3DDevice());
+ SyncDisplayTarget(true);
+ Log(CapabilityReport(CapabilitiesNow(),powerFacts,memoryFacts));
  lowMemoryNotice=CreateMemoryResourceNotification(LowMemoryResourceNotification);
  RefreshCacheBudget();
  FavouritesLoad();
@@ -4965,6 +6422,17 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  LensDbStart();
  worker=std::thread(Worker);
  ThumbStart(win,ThumbReady);
+ // Video Mode's expand control drives the window the shell already animates,
+ // rather than reaching for the window itself.
+ VideoModeSetExpandHandler([]{AnimateWindow(!WindowMaximized());},[]{return WindowMaximized();});
+ // The system's own media controls. Attached to this window, which is what
+ // makes the keyboard's play key reach this application rather than another.
+ SmtcAttach(win,SystemTransport);
+ // With VETRO_DEBUG set, the engine's own warnings join the session log. It is
+ // the difference between "loading failed" and knowing which certificate, which
+ // host or which codec it was (Appendix G).
+ if(testing||GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0))
+  PlaybackSetLogSink([](const std::wstring& line){Log(line);});
  if(!testing&&!quickCLI)IndexStart(win,IndexFolders,IndexProgress);
  SetTimer(win,3,350,nullptr);
  NOTIFYICONDATAW tray{sizeof(tray)};
@@ -4995,6 +6463,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  if(navBench){ShowWindow(win,SW_SHOW);SetTimer(win,7,navBenchInterval,nullptr);}
  else if(testing){ShowWindow(win,SW_SHOW);SetTimer(win,2,250,nullptr);}
  else if(quickCLI){preview=true;explorer=GetDesktopWindow();ApplyCorners();Open(argv[2]);}
+ // An address has no parent folder to walk back into, and asking the index for
+ // one would send it after a directory that does not exist.
+ else if(argc>1&&!background&&LooksLikeUrl(argv[1])){
+  navStack.clear();
+  Open(argv[1]);
+ }
  else if(argc>1&&!background){
   // Launched straight onto a file (Explorer, "Open with", a shortcut): Back
   // should still walk Viewer -> that file's folder -> the library, so the
@@ -5007,6 +6481,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
   IndexTouchFolder(parent);
   Open(argv[1]);
  }
+ // A plain start: nothing was asked for, so whatever the last session left
+ // unfinished comes back (43).
+ else if(argc<=1&&!background)RestoreSession();
  LocalFree(argv);
 
  // Presenting with vsync paces the loop to the display, so springs advance at
@@ -5026,8 +6503,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
   bool animating=Tick((std::min)(dt,.05f));
   if(animating||needFrame){
    needFrame=false;
-   if(IsWindowVisible(win))Frame();
-   else Sleep(8);
+   if(IsWindowVisible(win)){
+    Frame();
+    // What our own frame cost, measured to the point where it was ready to be
+    // presented. The wait for vertical blank that follows is not ours.
+    PacingRecordUiFrame(GfxLastRenderMs());
+   }else Sleep(8);
   }else if(!PeekMessageW(&msg,nullptr,0,0,PM_NOREMOVE))WaitMessage();
  }
  if(keyboardThread.joinable()){PostThreadMessageW(keyboardThreadId,WM_QUIT,0,0);keyboardThread.join();}
@@ -5040,6 +6521,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  MetaStop();ThumbStop();ShutdownSharing();
  FavouritesFlush();MetaCacheFlush();
  if(lowMemoryNotice){CloseHandle(lowMemoryNotice);lowMemoryNotice=nullptr;}
- ReleaseBitmaps();GfxDestroy();if(ole)OleUninitialize();RoUninitialize();
+ SmtcDetach();
+ MediaStateFlush();
+ // Reaching this line is what "exited on purpose" means (43).
+ ClearSessionCheckpoint();
+ ResolverCancel();AiStop();VideoModeStop();PreviewStop();ReleaseBitmaps();GfxDestroy();if(ole)OleUninitialize();RoUninitialize();
  return int(msg.wParam);
 }

@@ -1,5 +1,5 @@
-﻿cmake_minimum_required(VERSION 3.25)
-project(VetroLook VERSION 1.1.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.25)
+project(VetroLook VERSION 2.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -97,12 +97,12 @@ set_target_properties(dav1d::dav1d PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT
 set(AVIF_CODEC_DAV1D SYSTEM CACHE STRING "" FORCE)
 set(AVIF_LIBYUV OFF CACHE STRING "" FORCE)
 add_subdirectory("${ROOT}/libavif" avif EXCLUDE_FROM_ALL)
-add_executable(VetroLook WIN32 src/main.cpp src/gfx.cpp src/pipeline.cpp src/theme.cpp src/meta.cpp src/metaread.cpp src/metacache.cpp src/favourites.cpp src/lensdb.cpp src/thumbs.cpp src/index.cpp src/usn.cpp src/dnd.cpp src/actions.cpp src/shellreg.cpp src/share.cpp src/decoders.cpp src/psd.cpp src/wuffs.cpp src/explorer.cpp src/integrations.cpp src/tc_ini.cpp third_party/exif.cpp resources/app.rc)
-target_include_directories(VetroLook PRIVATE "${ROOT}/libjpeg-turbo/src" "${CMAKE_BINARY_DIR}/jpeg" "${ROOT}/libwebp/src" "${ROOT}/tinyexr/deps/miniz" third_party)
+add_executable(VetroLook WIN32 src/main.cpp src/media.cpp src/modes.cpp src/shellmedia.cpp src/videomode.cpp src/mpvengine.cpp src/preview.cpp src/subtitles.cpp src/mediastate.cpp src/streaming.cpp src/resolver.cpp src/transcript.cpp src/ai.cpp src/enhance.cpp src/smtc.cpp src/capability.cpp src/pacing.cpp src/governor.cpp src/gfx.cpp src/pipeline.cpp src/theme.cpp src/meta.cpp src/metaread.cpp src/metacache.cpp src/favourites.cpp src/lensdb.cpp src/thumbs.cpp src/index.cpp src/usn.cpp src/dnd.cpp src/actions.cpp src/shellreg.cpp src/share.cpp src/decoders.cpp src/psd.cpp src/wuffs.cpp src/explorer.cpp src/integrations.cpp src/tc_ini.cpp third_party/exif.cpp resources/app.rc)
+target_include_directories(VetroLook PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv/include" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/include" "${ROOT}/libjpeg-turbo/src" "${CMAKE_BINARY_DIR}/jpeg" "${ROOT}/libwebp/src" "${ROOT}/tinyexr/deps/miniz" third_party)
 target_compile_definitions(VetroLook PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX LIBRAW_NODLL _CRT_SECURE_NO_WARNINGS)
 target_compile_options(VetroLook PRIVATE /W4 /utf-8 /O2 /Gy /Gw /MP)
 target_link_options(VetroLook PRIVATE /OPT:REF /OPT:ICF /INCREMENTAL:NO)
-target_link_libraries(VetroLook PRIVATE turbojpeg-static webpdecoder webpdemux vetro_raw vetro_exr vetro_exiv2 avif d2d1 d3d11 dxgi dxguid dcomp dwrite dwmapi windowscodecs shell32 shlwapi ole32 oleaut32 uuid comdlg32 advapi32 gdi32 psapi runtimeobject windowsapp)
+target_link_libraries(VetroLook PRIVATE turbojpeg-static webpdecoder webpdemux vetro_raw vetro_exr vetro_exiv2 avif d2d1 d3d11 dxgi dxguid dcomp dwrite dwmapi windowscodecs shell32 shlwapi ole32 oleaut32 uuid comdlg32 advapi32 gdi32 psapi propsys powrprof runtimeobject windowsapp urlmon bcrypt)
 if(EXISTS "${PARENT_ROOT}/libjpeg-turbo")
  set(VETRO_DEFAULT_OUTPUT_DIR "${PARENT_ROOT}/dist")
 else()
@@ -112,6 +112,15 @@ set(VETRO_OUTPUT_DIR "${VETRO_DEFAULT_OUTPUT_DIR}" CACHE PATH "Application outpu
 set_target_properties(VetroLook PROPERTIES OUTPUT_NAME "VetroLook" RUNTIME_OUTPUT_DIRECTORY_RELEASE "${VETRO_OUTPUT_DIR}")
 # The Lensfun database travels with the application: 5 MB of CC-BY-SA 3.0 XML,
 # read at runtime by lensdb.cpp. See third_party/lensfun-db/COPYING.CC_BY-SA_3.0.
+# The playback library travels beside the executable, and is loaded by name from
+# there the first time a film is opened. A build without it is still a complete
+# image viewer; it simply reports that video cannot be played.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv/libmpv-2.dll")
+ add_custom_command(TARGET VetroLook POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv/libmpv-2.dll" "$<TARGET_FILE_DIR:VetroLook>/libmpv-2.dll"
+  COMMENT "Copying the playback library")
+endif()
 add_custom_command(TARGET VetroLook POST_BUILD
  COMMAND ${CMAKE_COMMAND} -E copy_if_different
   "${CMAKE_CURRENT_SOURCE_DIR}/README.txt" "$<TARGET_FILE_DIR:VetroLook>/README.txt"
@@ -128,7 +137,7 @@ if(VETRO_REVIEW_MODE)
 endif()
 
 
-add_executable(VetroActionTests EXCLUDE_FROM_ALL tests/actions-test.cpp src/actions.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroActionTests EXCLUDE_FROM_ALL src/media.cpp tests/actions-test.cpp src/actions.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
 add_executable(VetroIndexTests EXCLUDE_FROM_ALL tests/index-test.cpp src/index.cpp src/usn.cpp)
 target_compile_definitions(VetroIndexTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(VetroIndexTests PRIVATE /utf-8 /W4)
@@ -141,13 +150,66 @@ add_executable(VetroUsnDiagnostic EXCLUDE_FROM_ALL tests/usn-diagnostic.cpp src/
 add_executable(VetroTcIniTests EXCLUDE_FROM_ALL tests/tc-ini-test.cpp src/tc_ini.cpp)
 target_compile_definitions(VetroTcIniTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(VetroTcIniTests PRIVATE /utf-8 /W4)
-add_executable(VetroOrientationTests EXCLUDE_FROM_ALL tests/orientation-test.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroOrientationTests EXCLUDE_FROM_ALL src/media.cpp tests/orientation-test.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
 add_executable(VetroPsdMemoryTests EXCLUDE_FROM_ALL tests/psd-memory-test.cpp tests/psd-baseline.cpp src/psd.cpp)
 add_executable(VetroMetadataTests EXCLUDE_FROM_ALL tests/metadata-test.cpp src/metaread.cpp src/metacache.cpp src/favourites.cpp src/lensdb.cpp)
-add_executable(VetroBench EXCLUDE_FROM_ALL tests/bench.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
-add_executable(VetroDecodeProbe EXCLUDE_FROM_ALL tests/decode-probe.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
-add_executable(VetroRawStressTests EXCLUDE_FROM_ALL tests/raw-stress-test.cpp src/thumbs.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
-add_executable(VetroFilmstripStressTests EXCLUDE_FROM_ALL tests/filmstrip-stress-test.cpp src/thumbs.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroBench EXCLUDE_FROM_ALL src/media.cpp tests/bench.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroDecodeProbe EXCLUDE_FROM_ALL src/media.cpp tests/decode-probe.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroRawStressTests EXCLUDE_FROM_ALL src/media.cpp src/shellmedia.cpp tests/raw-stress-test.cpp src/thumbs.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+add_executable(VetroFilmstripStressTests EXCLUDE_FROM_ALL src/media.cpp src/shellmedia.cpp tests/filmstrip-stress-test.cpp src/thumbs.cpp src/decoders.cpp src/pipeline.cpp src/psd.cpp src/wuffs.cpp third_party/exif.cpp)
+# Prototype B: the feasibility gate for Video Mode's presentation path. Builds
+# only when the libmpv development package has been fetched into third_party.
+# See docs/STAGES.md and tools/fetch-mpv.ps1.
+set(VETRO_MPV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv")
+if(EXISTS "${VETRO_MPV_DIR}/mpv.lib" AND EXISTS "${VETRO_MPV_DIR}/include/mpv/client.h")
+ add_executable(VetroMpvProbe EXCLUDE_FROM_ALL tests/mpv-composition-probe.cpp)
+ target_include_directories(VetroMpvProbe PRIVATE "${VETRO_MPV_DIR}/include")
+ target_compile_definitions(VetroMpvProbe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+ target_compile_options(VetroMpvProbe PRIVATE /utf-8 /W4)
+ target_link_libraries(VetroMpvProbe PRIVATE "${VETRO_MPV_DIR}/mpv.lib" d3d11 dxgi dcomp user32)
+ add_custom_command(TARGET VetroMpvProbe POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+   "${VETRO_MPV_DIR}/libmpv-2.dll" "$<TARGET_FILE_DIR:VetroMpvProbe>/libmpv-2.dll")
+endif()
+
+# Playback quality: frame pacing, the Resource Governor and the capability
+# matrix. The decisions are pure functions of a sample struct, so they are tested
+# without a film; the last section of the test probes this machine and prints it.
+add_executable(VetroQualityTests EXCLUDE_FROM_ALL tests/quality-test.cpp src/pacing.cpp src/governor.cpp src/capability.cpp src/subtitles.cpp src/mediastate.cpp)
+target_compile_definitions(VetroQualityTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(VetroQualityTests PRIVATE /utf-8 /W4)
+target_link_libraries(VetroQualityTests PRIVATE d3d11 dxgi dxguid user32 advapi32 psapi powrprof shell32 ole32)
+
+# Stage 4's gate: a second, output-less decoder answering "what frame is here"
+# from anywhere in a film, without the playback engine being involved. Built
+# only where the libmpv development package has been fetched, like the
+# composition probe.
+if(EXISTS "${VETRO_MPV_DIR}/include/mpv/client.h")
+ add_executable(VetroPreviewProbe EXCLUDE_FROM_ALL tests/preview-probe.cpp src/preview.cpp src/mpvengine.cpp)
+ target_include_directories(VetroPreviewProbe PRIVATE "${VETRO_MPV_DIR}/include" src)
+ target_compile_definitions(VetroPreviewProbe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+ target_compile_options(VetroPreviewProbe PRIVATE /utf-8 /W4)
+ target_link_libraries(VetroPreviewProbe PRIVATE ole32)
+endif()
+
+# The media router and the mode lifecycle: what decides which presentation mode
+# a file gets. Pure logic, so it is tested against synthetic container headers.
+add_executable(VetroMediaTests EXCLUDE_FROM_ALL tests/media-test.cpp src/media.cpp src/modes.cpp src/streaming.cpp)
+target_compile_definitions(VetroMediaTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(VetroMediaTests PRIVATE /utf-8 /W4)
+# A stand-in for yt-dlp with the same output contract, so the resolver path --
+# job object, timeout, cancellation, parsing -- is tested without a site.
+add_executable(VetroResolverStub EXCLUDE_FROM_ALL tests/resolver-stub.cpp)
+target_compile_definitions(VetroResolverStub PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(VetroResolverStub PRIVATE /utf-8 /W4)
+set_target_properties(VetroResolverStub PROPERTIES OUTPUT_NAME yt-dlp)
+# AI subtitles without a model: planning, settling, filters, export, cache, silence skip.
+add_executable(VetroTranscriptTests EXCLUDE_FROM_ALL tests/transcript-test.cpp src/transcript.cpp)
+target_compile_definitions(VetroTranscriptTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(VetroTranscriptTests PRIVATE /utf-8 /W4)
+# When RTX Video Super Resolution runs and at what scale.
+add_executable(VetroEnhanceTests EXCLUDE_FROM_ALL tests/enhance-test.cpp src/enhance.cpp)
+target_compile_options(VetroEnhanceTests PRIVATE /utf-8 /W4)
 add_executable(VetroGuiBench EXCLUDE_FROM_ALL tests/blackbox-harness.cpp)
 target_compile_definitions(VetroGuiBench PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(VetroGuiBench PRIVATE /utf-8 /W4 /O2)

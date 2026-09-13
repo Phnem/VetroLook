@@ -14,6 +14,9 @@
 #ifndef MyNoticesPath
 #define MyNoticesPath "..\..\dist\THIRD_PARTY_NOTICES.txt"
 #endif
+#ifndef MyMpvPath
+#define MyMpvPath "..\..\dist\libmpv-2.dll"
+#endif
 #define MyAppPublisher "VetroLook"
 #define MyAppURL "https://github.com/Phnem/VetroLook"
 
@@ -37,7 +40,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\VetroLook.exe
-LicenseFile=..\..\LICENSE
+LicenseFile=..\..\VetroView\LICENSE
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -47,6 +50,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#MyExePath}"; DestDir: "{app}"; Flags: ignoreversion
+; The playback engine, loaded by name from beside the executable.
+Source: "{#MyMpvPath}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyLensDbPath}\*"; DestDir: "{app}\lensfun-db"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyReadmePath}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyNoticesPath}"; DestDir: "{app}"; Flags: ignoreversion

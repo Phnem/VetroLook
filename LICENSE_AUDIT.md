@@ -17,6 +17,38 @@ Plus 5.2 MB of Lensfun XML installed beside the executable (see below).
 
 ## Added
 
+### libmpv (mpv) 0.42-dev, client API 2.5 — **adopted for Video Mode**
+
+* **Licence:** mpv is **GPL-2.0-or-later** in the configuration these Windows
+  builds ship, which combines with GPL-3.0-or-later; the resulting binary is
+  GPLv3. mpv also offers an LGPL configuration, which is not what the published
+  Windows development packages are built as, so the GPL terms are the ones that
+  apply here and the combined work is distributed under them.
+* **Linking:** **dynamic, and loaded by name at run time**, from
+  `libmpv-2.dll` beside the executable. Nothing links against an import
+  library; `mpvengine.cpp` binds the sixteen entry points it uses through
+  `GetProcAddress`. Three consequences, all of them deliberate:
+  * opening a photograph never loads it — the measured working set of an
+    image-only session is unchanged;
+  * a build without the library is still a complete image viewer, and says so
+    in plain words when a film is opened;
+  * the library can be replaced without relinking the application, which is
+    what the GPL wants to be true of a dynamically linked component anyway.
+* **What it brings:** demuxing, decoding, hardware decode paths, A/V
+  synchronisation, colour management and the `gpu-next`/libplacebo render
+  pipeline. This is a decade of work the plan explicitly declines to repeat.
+* **Transitive dependencies:** FFmpeg and the codec libraries inside the
+  published build, all GPL-compatible in that configuration. They are not
+  linked into `VetroLook.exe`.
+* **Version pin:** the exact package is pinned in `tools/fetch-mpv.ps1` with
+  its SHA-256. Video Mode's presentation path uses composition output and the
+  `display-swapchain` property, neither of which is a stable contract, so the
+  pin is moved only after `VetroMpvProbe` has been run against the new build
+  and its report read.
+* **Size:** the published development DLL is 115 MB because it is unstripped.
+  Shipping it as it stands is not acceptable for a release and is tracked as
+  release work; it does not affect the application binary.
+
 ### Exiv2 0.28.7 — **adopted**
 
 * **Licence:** GPL-2.0-or-later. Compatible with GPL-3.0-or-later: the "or

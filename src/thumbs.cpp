@@ -3,6 +3,8 @@
 // full-resolution bitmap alive just to show a 74 pixel strip.
 #include "ui.h"
 #include "pipeline.h"
+#include "media.h"
+#include "shellmedia.h"
 #include <wincodec.h>
 #include <thread>
 #include <mutex>
@@ -112,6 +114,14 @@ std::shared_ptr<Image> Shrink(const std::shared_ptr<Image>& src){
 // only then a full decode. A folder of RAW files used to reach that last line
 // for every tile, which is what left the filmstrip black.
 std::shared_ptr<Image> Load(const std::wstring& path){
+ // A film's tile is its poster frame, from the shell's own thumbnail pipeline.
+ // No decoder here knows how to open one, and the filmstrip is shared between
+ // the modes: a mixed folder must not show gaps where its films are.
+ auto kind=KindFromExtension(path);
+ if(kind==MediaKind::Video||kind==MediaKind::Audio){
+  if(auto poster=ShellPoster(path,ThumbEdge))return Shrink(poster);
+  return {};
+ }
  if(auto quick=DecodeThumb(path,ThumbEdge))return Shrink(quick);
  if(auto wic=ViaWic(path))return wic;
  std::wstring error;return Shrink(Decode(path,error));

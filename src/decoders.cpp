@@ -1,4 +1,5 @@
 #include "image.h"
+#include "media.h"
 #include <wrl/client.h>
 #include <wincodec.h>
 #include <turbojpeg.h>
@@ -81,7 +82,10 @@ static std::shared_ptr<Image> Jpeg(const uint8_t* bytes,size_t size,unsigned max
 static std::wstring Extension(const std::wstring& path){auto e=std::filesystem::path(path).extension().wstring();std::transform(e.begin(),e.end(),e.begin(),towlower);return e;}
 static constexpr const wchar_t* RawExtensions=L"|.cr2|.cr3|.nef|.arw|.dng|.raf|.rw2|.orf|.pef|";
 static bool IsRaw(const std::wstring& ext){return !ext.empty()&&std::wstring(RawExtensions).find(L"|"+ext+L"|")!=std::wstring::npos;}
-bool Supported(const std::wstring& path){auto e=Extension(path);return !e.empty()&&std::wstring(L"|.jpg|.jpeg|.jfif|.png|.gif|.webp|.bmp|.tif|.tiff|.ico|.heic|.heif|.avif|.exr|.psd|.psb|.cr2|.cr3|.nef|.arw|.dng|.raf|.rw2|.orf|.pef|").find(L"|"+e+L"|")!=std::wstring::npos;}
+// The image decode gate. The list itself lives in media.cpp, with the video and
+// audio lists, because what the viewer claims to open is one product decision
+// rather than three that can drift apart.
+bool Supported(const std::wstring& path){return ImageExtensionSupported(Extension(path));}
 // A camera's own embedded preview, decoded straight from the file. The
 // filmstrip must never demosaic a 36 megapixel frame to fill a 180 pixel tile,
 // and must never read an 80 MB RAW into memory to do it.
