@@ -54,7 +54,14 @@ if($LASTEXITCODE){throw 'dav1d build failed'}
 # unpacked into third_party/mpv. Without it the build is an image viewer only.
 & "$PSScriptRoot/tools/fetch-mpv.ps1"
 if($LASTEXITCODE){throw 'libmpv fetch failed'}
-& $cmake -S $PSScriptRoot -B "$PSScriptRoot/build" -G 'Visual Studio 17 2022' -A x64
+# Pin the release output explicitly. CMake caches VETRO_OUTPUT_DIR, so an old
+# UI-review build directory could otherwise keep emitting a fresh binary into
+# dist-ui-review while the packagers silently reused a stale EXE. In the
+# standalone repository the packager is beside this script; this development
+# workspace keeps it one directory above VetroView.
+$releaseRoot = if (Test-Path (Join-Path $PSScriptRoot 'build-packages.ps1')) { $PSScriptRoot } else { $root }
+& $cmake -S $PSScriptRoot -B "$PSScriptRoot/build" -G 'Visual Studio 17 2022' -A x64 `
+  -DVETRO_OUTPUT_DIR="$(Join-Path $releaseRoot 'dist')"
 if($LASTEXITCODE){throw 'Configure failed'}
 & $cmake --build "$PSScriptRoot/build" --config Release --target VetroLook --parallel 8
 if($LASTEXITCODE){throw 'Build failed'}

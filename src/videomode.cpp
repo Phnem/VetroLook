@@ -70,7 +70,7 @@ unsigned surfaceWidth=0,surfaceHeight=0;
 // targets, and press feedback that scales rather than flashes.
 enum Control{
  CtrlNone,CtrlPlay,CtrlBack,CtrlForward,CtrlVolume,CtrlVolumeTrack,CtrlExpand,
- CtrlTrack,CtrlSettings,CtrlTracks,CtrlCount
+ CtrlTrack,CtrlSettings,CtrlAudio,CtrlSubtitles,CtrlPip,CtrlCount
 };
 struct Hit{Control id=CtrlNone;D2D1_RECT_F rect{};};
 D2D1_RECT_F barRect{},trackRect{},volumeTrackRect{};
@@ -158,15 +158,26 @@ double scrubTarget=0;
 double lastScrubSeek=0;
 void (*expandToggle)()=nullptr;
 bool (*expandState)()=nullptr;
+void (*pipToggle)()=nullptr;
+bool (*pipState)()=nullptr;
 
 // The two extra controls are useful only when they lead somewhere. Their card
 // stays attached to the transport, so it reads as one physical object instead
 // of a second, unrelated window on top of the film.
-enum Popup{PopupNone,PopupSpeed,PopupTracks};
+enum Popup{PopupNone,PopupSpeed,PopupAudio,PopupSubtitles};
 Popup popup=PopupNone;
+// Keep the outgoing kind until its spring is actually gone. Otherwise the
+// compositor can leave a frame of clear blur without its tinted material.
+Popup closingPopup=PopupNone;
 Spring popupReveal{0,PanelK,PanelC};
 struct PopupHit{D2D1_RECT_F rect{};double speed=0;std::wstring kind;int64_t id=0;};
 std::vector<PopupHit> popupHits;
+int popupHovered=-1;
+double videoZoom=1.0;
+
+Popup VisiblePopup(){return popup!=PopupNone?popup:closingPopup;}
+void ClosePopup(){if(popup!=PopupNone)closingPopup=popup;popup=PopupNone;popupHovered=-1;popupReveal.To(0.f);}
+void TogglePopup(Popup next){if(popup==next){ClosePopup();return;}popup=next;closingPopup=PopupNone;popupHovered=-1;popupReveal.To(1.f);}
 
 void Add(Control id,D2D1_RECT_F rect){
  if(hitCount<int(sizeof hits/sizeof hits[0]))hits[hitCount++]={id,rect};
@@ -339,8 +350,11 @@ void VideoModeEnter(const std::wstring& path,const MediaRoute& route,uint64_t ge
  surfaceFacts=MediaFacts{};
  surfacePoster.reset();posterTexture.Reset();
  snapshot=PlaybackSnapshot{};
- scrubbing=false;
- popup=PopupNone;popupReveal.Reset(0);popupHits.clear();
+ scrubbing=volumeDragging=false;
+ hovered=pressed=CtrlNone;hitCount=0;
+ barRect=trackRect=volumeTrackRect=D2D1::RectF(0,0,0,0);
+ popup=closingPopup=PopupNone;popupHovered=-1;popupReveal.Reset(0);popupHits.clear();
+ videoZoom=1.0;
  RememberState();
  MediaStateFlush();
  bubble=BubbleState{};bubbleText.clear();bubbleGeometryReady=false;
@@ -362,6 +376,7 @@ void VideoModeEnter(const std::wstring& path,const MediaRoute& route,uint64_t ge
  DetachContent();
  if(EnsureEngine()){
   if(surfaceWidth&&surfaceHeight)engine->SetSurfaceSize(surfaceWidth,surfaceHeight);
+  engine->SetVideoZoom(videoZoom);
   if(route.IsUrl())engine->OpenStream(path,streamOptions);
   else engine->Open(path);
  }
@@ -399,8 +414,11 @@ void VideoModeLeave(){
  surfacePoster.reset();
  posterTexture.Reset();
  surfaceGeneration=0;
- scrubbing=false;
- popup=PopupNone;popupReveal.Reset(0);popupHits.clear();
+ scrubbing=volumeDragging=false;
+ hovered=pressed=CtrlNone;hitCount=0;
+ barRect=trackRect=volumeTrackRect=D2D1::RectF(0,0,0,0);
+ popup=closingPopup=PopupNone;popupHovered=-1;popupReveal.Reset(0);popupHits.clear();
+ videoZoom=1.0;
  streamOptions=OpenOptions{};net=Network{};streamNotice.clear();
  if(aiOpened)AiClose();
  aiOpened=false;aiSubtitles=false;
@@ -920,7 +938,7 @@ bool VideoModePointerDown(float x,float y){
    else if(item.kind==L"sub")state.subtitleTrack=item.id;
    RememberState();
   }
-  popup=PopupNone;popupReveal.To(0);return true;
+  ClosePopup();return true;
  }
  auto control=At(x,y);
  pressed=control;
@@ -930,8 +948,10 @@ bool VideoModePointerDown(float x,float y){
   case CtrlForward:VideoModeSeekBy(10);return true;
   case CtrlVolume:VideoModeToggleMute();return true;
   case CtrlExpand:if(expandToggle)expandToggle();return true;
-  case CtrlSettings:popup=popup==PopupSpeed?PopupNone:PopupSpeed;popupReveal.To(popup==PopupNone?0.f:1.f);return true;
-  case CtrlTracks:popup=popup==PopupTracks?PopupNone:PopupTracks;popupReveal.To(popup==PopupNone?0.f:1.f);return true;
+  case CtrlPip:if(pipToggle)pipToggle();return true;
+  case CtrlSettings:TogglePopup(PopupSpeed);return true;
+  case CtrlAudio:TogglePopup(PopupAudio);return true;
+  case CtrlSubtitles:TogglePopup(PopupSubtitles);return true;
   case CtrlVolumeTrack:volumeDragging=true;VideoModePointerMove(x,y);return true;
   case CtrlTrack:
    if(snapshot.duration<=0)return true;
@@ -942,7 +962,8 @@ bool VideoModePointerDown(float x,float y){
 }
 void VideoModePointerMove(float x,float y){
  hovered=At(x,y);
- (void)y;
+ popupHovered=-1;
+ for(size_t i=0;i<popupHits.size();i++)if(Inside(popupHits[i].rect,x,y)){popupHovered=int(i);break;}
  // Hovering the timeline is a question, and it is answered whether or not the
  // pointer is held down.
  UpdatePreview(x,hovered==CtrlTrack||scrubbing);
@@ -986,6 +1007,9 @@ void VideoModePointerUp(float x,float y){
 bool VideoModeStep(float seconds){
  if(!springsReady)return false;
  bool moving=popupReveal.Step(seconds);
+ if(popup==PopupNone&&popupReveal.v<=.004f&&!popupReveal.Moving()){
+  closingPopup=PopupNone;popupHits.clear();
+ }
  moving|=previewReveal.Step(seconds);
  // The bubble's own clock. Its phase is decided from the cue and the silence
  // since the last one; its geometry follows in springs, so a retarget bends the
@@ -1036,6 +1060,10 @@ const wchar_t* PhForward=L"M200,32a8,8,0,0,0-8,8v69.23L72.43,34.45A15.95,15.95,0
 const wchar_t* PhVolume=L"M155.51,24.81a8,8,0,0,0-8.42.88L77.25,80H32A16,16,0,0,0,16,96v64a16,16,0,0,0,16,16H77.25l69.84,54.31A8,8,0,0,0,160,224V32A8,8,0,0,0,155.51,24.81ZM32,96H72v64H32ZM144,207.64,88,164.09V91.91l56-43.55Zm54-106.08a40,40,0,0,1,0,52.88,8,8,0,0,1-12-10.58,24,24,0,0,0,0-31.72,8,8,0,0,1,12-10.58ZM248,128a79.9,79.9,0,0,1-20.37,53.34,8,8,0,0,1-11.92-10.67,64,64,0,0,0,0-85.33,8,8,0,1,1,11.92-10.67A79.83,79.83,0,0,1,248,128Z";
 const wchar_t* PhMuted=L"M155.51,24.81a8,8,0,0,0-8.42.88L77.25,80H32A16,16,0,0,0,16,96v64a16,16,0,0,0,16,16H77.25l69.84,54.31A8,8,0,0,0,160,224V32A8,8,0,0,0,155.51,24.81ZM32,96H72v64H32ZM144,207.64,88,164.09V91.91l56-43.55Zm101.66-61.3a8,8,0,0,1-11.32,11.32L216,139.31l-18.34,18.35a8,8,0,0,1-11.32-11.32L204.69,128l-18.35-18.34a8,8,0,0,1,11.32-11.32L216,116.69l18.34-18.35a8,8,0,0,1,11.32,11.32L227.31,128Z";
 const wchar_t* PhTracks=L"M80,64a8,8,0,0,1,8-8H216a8,8,0,0,1,0,16H88A8,8,0,0,1,80,64Zm136,56H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16Zm0,64H88a8,8,0,0,0,0,16H216a8,8,0,0,0,0-16ZM44,52A12,12,0,1,0,56,64,12,12,0,0,0,44,52Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,116Zm0,64a12,12,0,1,0,12,12A12,12,0,0,0,44,180Z";
+const wchar_t* PhSubtitles=L"M48,48H208A16,16,0,0,1,224,64V176A16,16,0,0,1,208,192H48A16,16,0,0,1,32,176V64A16,16,0,0,1,48,48ZM72,96v16h72V96Zm0,40v16h112v-16Z";
+const wchar_t* PhPip=L"M48,40H208A16,16,0,0,1,224,56V184A16,16,0,0,1,208,200H48A16,16,0,0,1,32,184V56A16,16,0,0,1,48,40Zm0,16V184H208V56ZM128,120h64v48H128Z";
+// Phosphor Gauge: speed is a rate, not a settings concept.
+const wchar_t* PhGauge=L"M128,40A88,88,0,1,0,216,128A88,88,0,0,0,128,40ZM88,160l56-48,8,8-48,56ZM128,80a8,8,0,1,1,0,16,8,8,0,0,1,0-16Zm-48,40a8,8,0,1,1,0,16,8,8,0,0,1,0-16Zm96,0a8,8,0,1,1,0,16,8,8,0,0,1,0-16Z";
 const wchar_t* PhSettings=L"M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z";
 const wchar_t* PhExpand=L"M216,48V88a8,8,0,0,1-16,0V56H168a8,8,0,0,1,0-16h40A8,8,0,0,1,216,48ZM88,200H56V168a8,8,0,0,0-16,0v40a8,8,0,0,0,8,8H88a8,8,0,0,0,0-16Zm120-40a8,8,0,0,0-8,8v32H168a8,8,0,0,0,0,16h40a8,8,0,0,0,8-8V168A8,8,0,0,0,208,160ZM88,40H48a8,8,0,0,0-8,8V88a8,8,0,0,0,16,0V56H88a8,8,0,0,0,0-16Z";
 const wchar_t* PhCompress=L"M152,96V48a8,8,0,0,1,16,0V88h40a8,8,0,0,1,0,16H160A8,8,0,0,1,152,96ZM96,152H48a8,8,0,0,0,0,16H88v40a8,8,0,0,0,16,0V160A8,8,0,0,0,96,152Zm112,0H160a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V168h40a8,8,0,0,0,0-16ZM96,40a8,8,0,0,0-8,8V88H48a8,8,0,0,0,0,16H96a8,8,0,0,0,8-8V48A8,8,0,0,0,96,40Z";
@@ -1162,25 +1190,35 @@ void Slider(D2D1_RECT_F rect,float progress,float alpha,bool active,float thickn
 // It never becomes a settings drawer: transport stays transport, and a video
 // remains the primary surface.
 D2D1_RECT_F PopupRect(D2D1_RECT_F viewport){
- if(popup==PopupNone&&popupReveal.v<=.004f)return D2D1::RectF(0,0,0,0);
+ if(VisiblePopup()==PopupNone&&popupReveal.v<=.004f)return D2D1::RectF(0,0,0,0);
  auto bar=VideoModeControlPanel(viewport);
  if(bar.right<=bar.left)return D2D1::RectF(0,0,0,0);
- constexpr float width=196.f,height=126.f,gap=12.f;
+ constexpr float width=196.f,gap=12.f;
+ float height=126.f;
+ auto kind=VisiblePopup();
+ if((kind==PopupAudio||kind==PopupSubtitles)&&engine){
+  int rows=0;
+  const bool audio=kind==PopupAudio;
+  for(const auto& track:engine->Tracks())if(track.kind==(audio?L"audio":L"sub"))rows++;
+  if(!audio&&!surfaceRoute.IsUrl())rows++; // AI subtitles
+  rows=(std::max)(1,(std::min)(rows,6));
+  height=43.f+rows*30.f;
+ }
  float right=bar.right-22.f-34.f-8.f;
  float left=right-width;
  // Narrow windows get the same card, just centred above the primary action.
  left=(std::max)(bar.left+12.f,(std::min)(left,bar.right-width-12.f));
  return D2D1::RectF(left,bar.top-gap-height,left+width,bar.top-gap);
 }
-void PopupButton(D2D1_RECT_F rect,const std::wstring& label,bool selected,float alpha){
+void PopupButton(D2D1_RECT_F rect,const std::wstring& label,bool selected,bool hoveredRow,float alpha){
  auto target=Dc();
- if(selected){
-  Ink()->SetColor(White(.17f*alpha));
+ if(selected||hoveredRow){
+  Ink()->SetColor(White((selected?.17f:.09f)*alpha));
   target->FillRoundedRectangle(D2D1::RoundedRect(rect,10,10),Ink());
-  Ink()->SetColor(White(.22f*alpha));
+  Ink()->SetColor(White((selected?.22f:.11f)*alpha));
   target->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rect.left+.5f,rect.top+.5f,rect.right-.5f,rect.bottom-.5f),10,10),Ink(),1.f);
  }
- Write(label,rect,F_Small,White((selected?.98f:.72f)*alpha));
+ Write(label,rect,F_Small,White((selected?.98f:hoveredRow?.90f:.72f)*alpha));
 }
 std::wstring TrackLabel(const TrackInfo& track){
  if(!track.title.empty())return track.title;
@@ -1200,38 +1238,40 @@ void PaintPopup(D2D1_RECT_F viewport,float alpha){
  auto shape=D2D1::RoundedRect(rect,22,22);
  SoftShadow(shape,.42f*alpha*reveal,1.45f);
  FrostedSurface(shape,alpha*reveal);
- if(popup==PopupSpeed){
+ auto kind=VisiblePopup();
+ if(kind==PopupSpeed){
   Write(T(S_PlaybackSpeed),D2D1::RectF(rect.left+16,rect.top+14,rect.right-16,rect.top+34),F_Meta,White(.68f*alpha*reveal));
   constexpr double rates[]={.75,1.,1.25};
   for(int i=0;i<3;i++){
    float left=rect.left+14+i*58.f;
    auto button=D2D1::RectF(left,rect.top+43,left+52.f,rect.top+77.f);
    wchar_t label[16];swprintf_s(label,L"%gx",rates[i]);
-   PopupButton(button,label,fabs(snapshot.speed-rates[i])<.01,alpha*reveal);
+   PopupButton(button,label,fabs(snapshot.speed-rates[i])<.01,popupHovered==i,alpha*reveal);
    popupHits.push_back({button,rates[i],L"",0});
   }
   Write(T(S_PlaybackRate),D2D1::RectF(rect.left+16,rect.bottom-31,rect.right-16,rect.bottom-13),F_Small,White(.56f*alpha*reveal));
- }else if(popup==PopupTracks&&engine){
+ }else if((kind==PopupAudio||kind==PopupSubtitles)&&engine){
   auto tracks=engine->Tracks();
-  Write(T(S_StreamList),D2D1::RectF(rect.left+16,rect.top+12,rect.right-16,rect.top+31),F_Meta,White(.68f*alpha*reveal));
+  const bool audio=kind==PopupAudio;
+  Write(audio?T(S_AudioTrack):T(S_SubtitleTrack),D2D1::RectF(rect.left+16,rect.top+12,rect.right-16,rect.top+31),F_Meta,White(.68f*alpha*reveal));
   int row=0;
-  // Generated subtitles are one more choice among the streams, in the same row
-  // style, for a local film on a machine with the runtime.
-  bool aiRow=!surfaceRoute.IsUrl();
-  int trackRows=aiRow?2:3;
+  // Generated captions belong to subtitles alone. Audio and subtitles have
+  // independent docks and never compete for the same three short rows.
+  bool aiRow=!audio&&!surfaceRoute.IsUrl();
+  int trackRows=aiRow?5:6;
   for(const auto& track:tracks){
-   if(track.kind!=L"audio"&&track.kind!=L"sub")continue;
+   if(track.kind!=(audio?L"audio":L"sub"))continue;
    if(row==trackRows)break;
-   float top=rect.top+35.f+row*25.f;
-   auto button=D2D1::RectF(rect.left+10,top,rect.right-10,top+23.f);
-   PopupButton(button,TrackLabel(track),track.selected,alpha*reveal);
+   float top=rect.top+34.f+row*30.f;
+   auto button=D2D1::RectF(rect.left+10,top,rect.right-10,top+27.f);
+   PopupButton(button,TrackLabel(track),track.selected,popupHovered==row,alpha*reveal);
    popupHits.push_back({button,0,track.kind,track.id});
    row++;
   }
   if(aiRow){
-   float top=rect.top+35.f+row*25.f;
-   auto button=D2D1::RectF(rect.left+10,top,rect.right-10,top+23.f);
-   PopupButton(button,T(S_AiSubtitles),aiSubtitles,alpha*reveal);
+   float top=rect.top+34.f+row*30.f;
+   auto button=D2D1::RectF(rect.left+10,top,rect.right-10,top+27.f);
+   PopupButton(button,T(S_AiSubtitles),aiSubtitles,popupHovered==row,alpha*reveal);
    popupHits.push_back({button,0,L"ai",0});
    row++;
   }
@@ -1239,7 +1279,7 @@ void PaintPopup(D2D1_RECT_F viewport,float alpha){
  }else{
   // While the stream list is arriving, keep the object stable instead of
   // popping it out and back in. It makes the panel feel loaded, not broken.
-  Write(T(S_StreamList),D2D1::RectF(rect.left+16,rect.top+12,rect.right-16,rect.top+31),F_Meta,White(.68f*alpha*reveal));
+  Write(T(S_LoadingStreams),D2D1::RectF(rect.left+16,rect.top+12,rect.right-16,rect.top+31),F_Meta,White(.68f*alpha*reveal));
   Write(T(S_LoadingStreams),D2D1::RectF(rect.left+16,rect.top+49,rect.right-16,rect.top+71),F_Small,White(.72f*alpha*reveal));
  }
  target->SetTransform(previous);
@@ -1506,12 +1546,14 @@ void VideoModePaintOverlay(D2D1_RECT_F viewport,const Palette& palette,float alp
  float volumeWidth=(std::min)(96.f,(back.left-volume.right)-24.f);
  volumeTrackRect=D2D1::RectF(volume.right+10.f,rowY-9.f,volume.right+10.f+(std::max)(0.f,volumeWidth),rowY+9.f);
  auto expand=centred(barRect.right-22.f-smallSize/2,smallSize);
- auto settings=centred(expand.left-10.f-smallSize/2,smallSize);
- auto tracks=centred(settings.left-10.f-smallSize/2,smallSize);
- bool showExtras=barRect.right-barRect.left>=600.f;
+ auto pip=centred(expand.left-10.f-smallSize/2,smallSize);
+ auto settings=centred(pip.left-10.f-smallSize/2,smallSize);
+ auto subtitles=centred(settings.left-10.f-smallSize/2,smallSize);
+ auto audio=centred(subtitles.left-10.f-smallSize/2,smallSize);
+ bool showExtras=barRect.right-barRect.left>=700.f;
 
  Add(CtrlPlay,play);Add(CtrlBack,back);Add(CtrlForward,forward);
- Add(CtrlVolume,volume);if(showExtras){Add(CtrlTracks,tracks);Add(CtrlSettings,settings);}Add(CtrlExpand,expand);
+ Add(CtrlVolume,volume);if(showExtras){Add(CtrlAudio,audio);Add(CtrlSubtitles,subtitles);Add(CtrlSettings,settings);Add(CtrlPip,pip);}Add(CtrlExpand,expand);
  if(volumeTrackRect.right>volumeTrackRect.left+8)Add(CtrlVolumeTrack,volumeTrackRect);
 
  // Playback remains the spatial centre, but it is no longer wrapped in a
@@ -1521,9 +1563,11 @@ void VideoModePaintOverlay(D2D1_RECT_F viewport,const Palette& palette,float alp
  RoundButton(CtrlForward,forward,PhForward,9.f,0.f,alpha,true);
  RoundButton(CtrlVolume,volume,snapshot.muted?PhMuted:PhVolume,8.f,0.f,alpha,true);
  if(showExtras){
-  RoundButton(CtrlTracks,tracks,PhTracks,8.f,popup==PopupTracks?.08f:0.f,alpha,true);
-  RoundButton(CtrlSettings,settings,PhSettings,8.f,popup==PopupSpeed?.08f:0.f,alpha,true);
- }else if(popup!=PopupNone){popup=PopupNone;popupReveal.To(0);}
+  RoundButton(CtrlAudio,audio,PhTracks,8.f,popup==PopupAudio?.08f:0.f,alpha,true);
+  RoundButton(CtrlSubtitles,subtitles,PhSubtitles,8.f,popup==PopupSubtitles?.08f:0.f,alpha,true);
+  RoundButton(CtrlSettings,settings,PhGauge,8.f,popup==PopupSpeed?.08f:0.f,alpha,true);
+  RoundButton(CtrlPip,pip,PhPip,8.f,pipState&&pipState()?.08f:0.f,alpha,true);
+ }else if(popup!=PopupNone){ClosePopup();}
  RoundButton(CtrlExpand,expand,expandState&&expandState()?PhCompress:PhExpand,9.f,0.f,alpha,true);
  if(volumeTrackRect.right>volumeTrackRect.left+8)
   Slider(volumeTrackRect,snapshot.muted?0.f:float(snapshot.volume/100.0),alpha,volumeDragging,4.f,12.f);
@@ -1581,6 +1625,7 @@ D2D1_RECT_F VideoModeControlPanel(D2D1_RECT_F viewport){
  return D2D1::RectF(cx-width/2,viewport.bottom-PanelHeight-PanelMargin,cx+width/2,viewport.bottom-PanelMargin);
 }
 D2D1_RECT_F VideoModePopupPanel(D2D1_RECT_F viewport){return PopupRect(viewport);}
+float VideoModePopupOpacity(){return float(Clamp01(popupReveal.v));}
 D2D1_RECT_F VideoModePreviewPanel(D2D1_RECT_F viewport){return PreviewCardRect(viewport);}
 D2D1_RECT_F VideoModeSubtitlePanel(){return bubbleRect;}
 std::wstring VideoModeCueDescription(){
@@ -1605,6 +1650,12 @@ void VideoModeSetSubtitlePolicy(double collapseAfterSeconds,const std::wstring& 
  if(engine)engine->SetLanguagePreference(subtitleLanguages,audioLanguages);
 }
 void VideoModeSetVolume(double percent){if(engine)engine->SetVolume(percent);}
+void VideoModeSetZoom(double scale){
+ videoZoom=(std::max)(1.0,(std::min)(scale,8.0));
+ if(engine)engine->SetVideoZoom(videoZoom);
+}
+double VideoModeZoom(){return videoZoom;}
+void VideoModeResetZoom(){VideoModeSetZoom(1.0);}
 void VideoModeSetTarget(const PresentationTarget& target){
  if(target==quality.target)return;
  quality.target=target;
@@ -1631,6 +1682,9 @@ void VideoModeToggleMute(){
 }
 void VideoModeSetExpandHandler(void(*toggle)(),bool(*expanded)()){
  expandToggle=toggle;expandState=expanded;
+}
+void VideoModeSetPipHandler(void(*toggle)(),bool(*active)()){
+ pipToggle=toggle;pipState=active;
 }
 
 const MediaFacts& VideoModeFacts(){return surfaceFacts;}

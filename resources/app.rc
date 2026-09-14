@@ -9,8 +9,8 @@ IDI_APP_ICON ICON "app.ico"
 // The version Windows shows in the file's Properties and in Installed apps.
 // Kept in step with project(... VERSION) in CMakeLists.txt.
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,1,0,0
- PRODUCTVERSION 2,1,0,0
+ FILEVERSION 2,2,0,0
+ PRODUCTVERSION 2,2,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -23,12 +23,12 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "VetroLook"
    VALUE "FileDescription", "Vetro Look"
-   VALUE "FileVersion", "2.1"
+   VALUE "FileVersion", "2.2"
    VALUE "InternalName", "VetroLook"
    VALUE "LegalCopyright", "GPL-3.0-or-later"
    VALUE "OriginalFilename", "VetroLook.exe"
    VALUE "ProductName", "Vetro Look"
-   VALUE "ProductVersion", "2.1"
+   VALUE "ProductVersion", "2.2"
   END
  END
  BLOCK "VarFileInfo"

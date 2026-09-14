@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.2 — 2026-09-14
+
+- Rebuilt Video Mode chrome as dense macOS-style frosted matte material: live backdrop blur, restrained vibrancy and contrast, neutral tint, micro-grain, inner highlight, bright hairline and soft shadow.
+- Replaced the transport glyphs with a consistent Phosphor Icons family and removed the ornamental disc around the primary playback action.
+- Split audio tracks and subtitles into independent animated popups whose height follows their content and whose rows have real hover feedback.
+- Kept the transport's DirectComposition blur stable while popups, timeline previews and subtitle bubbles appear or disappear.
+- Added a dedicated picture-in-picture control and fixed repeated PiP entry, maximized-window restoration and mode-exit state leakage.
+- Made the player window follow the video's aspect ratio and use the real Windows maximized state, without compact-window corner artefacts.
+- Added real video magnification through mpv, controlled by the wheel and the `+`, `-`, `0` and `1` keys.
+- Activated Send, Save, Save As and Delete for video files, while removing image-only Print, power and Space-preview settings from Video Mode.
+- Improved video information, loading-state handling, popup close animation and the compact title treatment.
+- Added release-grade MSI, Inno Setup and portable ZIP packaging plus a standalone clean uninstaller for stale legacy installations and shell registrations.
+- Fixed the build pipeline retaining a cached review output directory and silently packaging an older executable.
+
 ## 2.1 — 2026-09-13
 
 - Added media routing: a file's kind is decided by extension and, where the name is misleading, by its container signature, so a film named `.jpg` opens as a film and a photograph named `.mp4` opens as a photograph.

@@ -101,9 +101,16 @@ uint64_t VideoModeSeekGeneration();
 // silenced and a film at zero are different states to come back from.
 void VideoModeSetVolume(double percent);
 void VideoModeToggleMute();
+void VideoModeSetZoom(double scale);
+double VideoModeZoom();
+void VideoModeResetZoom();
 // The shell owns the window, so the expand control asks it rather than resizing
 // anything itself.
 void VideoModeSetExpandHandler(void(*toggle)(),bool(*expanded)());
+// PiP is the same top-level window changing shape. Video Mode only requests
+// that transition; ownership of the HWND and its restore geometry stays with
+// the shell.
+void VideoModeSetPipHandler(void(*toggle)(),bool(*active)());
 bool VideoModeShowingVideo();          // the engine's picture is on screen
 const PlaybackSnapshot& VideoModeSnapshot();
 
@@ -140,6 +147,9 @@ D2D1_RECT_F VideoModeControlPanel(D2D1_RECT_F viewport);
 // The small speed / stream card grows from the transport instead of opening a
 // separate window. The shell frosts it alongside the main transport.
 D2D1_RECT_F VideoModePopupPanel(D2D1_RECT_F viewport);
+// The compositor fades its blurred source at exactly the same rate as the
+// Direct2D card, preventing a clear after-image while a popup closes.
+float VideoModePopupOpacity();
 // The timeline's preview card, when the pointer is asking. Frosted by the
 // compositor like everything else that floats over the film.
 D2D1_RECT_F VideoModePreviewPanel(D2D1_RECT_F viewport);

@@ -10,6 +10,7 @@
 #include <mpv/client.h>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -387,6 +388,15 @@ public:
  void SetSpeed(double speed)override{
   if(!handle_)return;
   api.set_property(handle_,"speed",MPV_FORMAT_DOUBLE,&speed);
+ }
+ void SetVideoZoom(double scale)override{
+  if(!handle_)return;
+  // mpv's video-zoom is logarithmic: 0 is the fitted picture, 1 is twice its
+  // linear size. Exposing a linear scale keeps the shell's wheel behaviour
+  // predictable and gives 1.0 a real reset point.
+  scale=(std::max)(1.0,(std::min)(scale,8.0));
+  double level=std::log2(scale);
+  api.set_property(handle_,"video-zoom",MPV_FORMAT_DOUBLE,&level);
  }
  void SetSurfaceSize(unsigned width,unsigned height)override{
   if(!handle_||!width||!height)return;

@@ -384,6 +384,8 @@ double lateFrameRate=0;                // late frames per minute, smoothed
 bool pictureInPicture=false;
 // 33.2: pinned is always on top; unpinned takes its turn with other windows.
 bool pipPinned=true;
+RECT pipRestoreBounds{};
+bool pipRestoreTopmost=false,pipRestoreMaximized=false,pipRestoreValid=false;
 void TogglePictureInPicture();
 // Frames drawn while the window is being created, resized, or handed a new film
 // are expensive for reasons that have nothing to do with whether this machine can
@@ -411,6 +413,7 @@ double videoAspect=0;
 void FitWindowToVideo(unsigned videoWidth,unsigned videoHeight);
 void Open(const std::wstring& path,bool force=false,MediaKind forced=MediaKind::Unsupported);
 void SyncVideoSurface();
+void ApplyCorners();
 void Fit();
 void SyncGallery();
 
@@ -538,24 +541,22 @@ void Fit(){
 void Snap(){zoomLog.Reset(zoomLog.target);panSX.Reset(panSX.target);panSY.Reset(panSY.target);}
 void AnimateWindow(bool maximise){
  if(preview||windowAnimating)return;
- GetWindowRect(win,&windowAnimationFrom);
- MONITORINFO monitor{sizeof(monitor)};
- GetMonitorInfoW(MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST),&monitor);
- BOOL disable=TRUE;DwmSetWindowAttribute(win,DWMWA_TRANSITIONS_FORCEDISABLED,&disable,sizeof(disable));
+ // Full screen must be the actual Windows maximized state. Stretching the
+ // borderless client rect to rcWork looked close, but left the compositor with
+ // compact-window corners (the blue slivers in the screenshot) and never gave
+ // the video surface the monitor's true bounds.
  if(maximise){
-  GetWindowPlacement(win,&windowRestore);
-  customRestore=windowAnimationFrom;
-  windowAnimationTo=monitor.rcWork;
- }else{
-  // Restore the OS state before interpolating, but keep the visible rectangle
-  // at the old bounds until the first animation frame is ready.
-  if(customMax){windowAnimationTo=customRestore;customMax=false;}
-  else {ShowWindow(win,SW_RESTORE);GetWindowRect(win,&windowAnimationTo);}
-  SetWindowPos(win,nullptr,windowAnimationFrom.left,windowAnimationFrom.top,
-   windowAnimationFrom.right-windowAnimationFrom.left,windowAnimationFrom.bottom-windowAnimationFrom.top,
-   SWP_NOZORDER|SWP_NOACTIVATE);
+  if(WindowMaximized())return;
+  customMax=false;
+  ShowWindow(win,SW_MAXIMIZE);
+  ApplyCorners();SyncVideoSurface();Wake();
+  return;
  }
- windowAnimationMax=maximise;windowAnimationTime=reducedMotion?.22f:0;windowAnimating=true;Wake();
+ if(WindowMaximized()){
+  customMax=false;
+  ShowWindow(win,SW_RESTORE);
+  ApplyCorners();SyncVideoSurface();Wake();
+ }
 }
 bool StepWindow(float dt){
  if(!windowAnimating)return false;
@@ -1180,8 +1181,26 @@ void Save(bool as){
  });
  Notify(T(S_Saving));
 }
+// A video has no destructive edit buffer to encode. "Save" therefore means
+// that the original is already safe, while "Save as" makes a byte-for-byte
+// copy without sending the film through an image pipeline.
+void SaveVideoCopy(bool as){
+ if(!mediaMode.InVideo()||currentPath.empty()||actionBusy)return;
+ if(!as){Notify(T(S_NoChanges));return;}
+ wchar_t file[32768]{};
+ auto suggested=fs::path(currentPath).stem().wstring()+L"-copy"+fs::path(currentPath).extension().wstring();
+ wcscpy_s(file,suggested.c_str());
+ OPENFILENAMEW dialog{sizeof(dialog)};
+ dialog.hwndOwner=win;dialog.lpstrFile=file;dialog.nMaxFile=32768;
+ dialog.lpstrFilter=L"Video files\0*.mp4;*.mkv;*.mov;*.webm;*.avi\0All files\0*.*\0";
+ dialog.Flags=OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+ if(!GetSaveFileNameW(&dialog))return;
+ if(CopyFileW(currentPath.c_str(),file,FALSE))Notify(T(S_Saved));
+ else Notify(T(S_Unavailable));
+}
 void RemoveCurrent(){
- if(!current||loading||actionBusy)return;
+ bool video=mediaMode.InVideo()&&!currentPath.empty();
+ if((!current&&!video)||(!video&&loading)||actionBusy)return;
  std::wstring error;
  if(!RecycleImage(win,currentPath,error)){Notify(error);return;}
  auto it=std::find(siblings.begin(),siblings.end(),currentPath);
@@ -1267,7 +1286,7 @@ void Close(){
  // playing is a film nobody is watching and audio nobody asked for.
  {
   auto transition=mediaMode.Close();
-  if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+  if(transition.releaseVideo){if(pictureInPicture){windowAnimating=false;TogglePictureInPicture();}VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
  }
  if(preview){
   ShowWindow(win,SW_HIDE);
@@ -1345,7 +1364,7 @@ void PlayStream(const std::wstring& shown,const std::wstring& media,const OpenOp
  screen=ScrViewer;
  if(!preview){KillTimer(win,6);SetWindowLongPtrW(win,GWLP_HWNDPARENT,0);}
  auto transition=mediaMode.Open(route.kind);
- if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ if(transition.releaseVideo){if(pictureInPicture){windowAnimating=false;TogglePictureInPicture();}VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
  current.reset();bitmap.Reset();backdrop.Reset();backdropSource.reset();currentFrameKey.clear();
  currentPath=url;currentRoute=route;
  siblings.clear();galleryWidth.clear();
@@ -1429,7 +1448,7 @@ void Open(const std::wstring& path,bool force,MediaKind forced){
  // bytes call for, when the worker that tried it reports what it really was.
  MediaKind kind=forced!=MediaKind::Unsupported?forced:KindFromExtension(nextPath);
  auto transition=mediaMode.Open(kind);
- if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ if(transition.releaseVideo){if(pictureInPicture){windowAnimating=false;TogglePictureInPicture();}VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
  if(kind==MediaKind::Video||kind==MediaKind::Audio){
   // Entering Video Mode. The window, its chrome, the filmstrip and the theme
   // are untouched; what changes is which mode draws the media surface.
@@ -1998,7 +2017,7 @@ void GoToLibrary(){
  // One media item owns the foreground at a time, and the library is not one:
  // whatever mode held the surface is closed here, with its resources.
  auto transition=mediaMode.Close();
- if(transition.releaseVideo){VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
+ if(transition.releaseVideo){if(pictureInPicture){windowAnimating=false;TogglePictureInPicture();}VideoModeLeave();videoAspect=0;shapedWidth=shapedHeight=0;}
  SetWindowPos(win,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
  RefreshLibrary();
  auto previousFolder=albumFolder;
@@ -2192,7 +2211,8 @@ void Layout(){
   };
   if(panel==PanelMenu){
    if(menuLevel==0){
-    row(IdSend,RowH);row(IdSave,RowH);row(IdSaveAs,RowH);row(IdPrint,RowH);
+    row(IdSend,RowH);row(IdSave,RowH);row(IdSaveAs,RowH);
+    if(!mediaMode.InVideo())row(IdPrint,RowH);
     auto del=row(IdDelete,RowH);
     if(confirmDelete){
      rowTop=del.bottom+8;
@@ -2204,15 +2224,15 @@ void Layout(){
     rowTop+=GroupGap;
     // Playback rows belong to a film, so they appear only when one is open.
     if(mediaMode.InVideo()){
-     row(IdSyncRow,RowH);row(IdPowerRow,RowH);row(IdSeekStep,RowH);row(IdEnhancement,RowH);
+     row(IdSyncRow,RowH);row(IdSeekStep,RowH);row(IdEnhancement,RowH);
      if(AiInstalled()){row(IdAiLanguage,RowH);row(IdSilenceSkip,RowH);}
-     row(IdDiagnostics,RowH);
      rowTop+=GroupGap;
     }
     // AI subtitles are downloaded from here whether or not a film is open: the
     // download is large, and the viewer should be able to start it ahead of time.
     row(IdAiModel,RowH);
-    row(IdDefaultApp,RowH);row(IdSpacePreview,RowH);
+    row(IdDefaultApp,RowH);
+    if(!mediaMode.InVideo())row(IdSpacePreview,RowH);
     if(tcStatus!=TcMissing)row(IdTotalCmd,RowH);
     rowTop+=GroupGap;
     D2D1_RECT_F theme=D2D1::RectF(body.left+12,rowTop,body.right-12,rowTop+RowH);
@@ -2234,6 +2254,9 @@ void Layout(){
     segments(IdWheelZoom,IdWheelNav,wheel,T(S_WheelLabel));
     rowTop=wheel.bottom+RowGap;
     row(IdLanguage,RowH);
+    // Diagnostics is deliberately last: it is an escape hatch, not a playback
+    // preference and should never interrupt the everyday actions above.
+    if(mediaMode.InVideo())row(IdDiagnostics,RowH);
    }else{
     row(IdLangBack,46);rowTop+=6;
     row(IdLangRu,RowH);row(IdLangEn,RowH);
@@ -2805,6 +2828,58 @@ void PaintInfoPanel(D2D1_RECT_F body,const Palette& p,float alpha){
  auto target=Dc();
  Write(T(S_Information),D2D1::RectF(body.left+18,body.top+14,body.right-18,body.top+40),F_Title,Fade(p.text,alpha));
  Write(Name(),D2D1::RectF(body.left+18,body.top+38,body.right-18,body.top+58),F_Meta,Fade(p.dim,alpha));
+ // Video does not have the photo metadata pipeline's `info` object.  Building
+ // its inspector directly from the shell facts and live playback snapshot
+ // avoids an empty panel while the deeper probes (HDR/camera/bitrate timeline)
+ // are still optional per container.
+ if(mediaMode.InVideo()){
+  target->PushAxisAlignedClip(D2D1::RectF(body.left,body.top+PanelHead-10,body.right,body.bottom),D2D1_ANTIALIAS_MODE_ALIASED);
+  float y=body.top+PanelHead-6-panelScroll;
+  auto section=[&](const wchar_t* title,const std::vector<Field>& fields){
+   if(fields.empty())return;
+   Write(title,D2D1::RectF(body.left+18,y,body.right-18,y+20),F_Section,Fade(p.faint,alpha));y+=26;
+   for(const auto& field:fields){
+    Write(field.label,D2D1::RectF(body.left+18,y,body.left+150,y+22),F_Label,Fade(p.dim,alpha));
+    Write(field.value,D2D1::RectF(body.left+140,y,body.right-18,y+22),F_Value,Fade(p.text,alpha));y+=23;
+   }
+   y+=12;
+  };
+  const auto& facts=VideoModeFacts();const auto& playback=VideoModeSnapshot();
+  auto number=[](double value,int precision){wchar_t text[32];swprintf_s(text,L"%.*f",precision,value);return std::wstring(text);};
+  auto bytes=[](uint64_t value){wchar_t text[32];if(value>=1073741824ull)swprintf_s(text,L"%.2f GB",double(value)/1073741824.0);else if(value>=1048576ull)swprintf_s(text,L"%.1f MB",double(value)/1048576.0);else swprintf_s(text,L"%llu KB",value/1024);return std::wstring(text);};
+  unsigned width=playback.width?playback.width:facts.width,height=playback.height?playback.height:facts.height;
+  double fps=playback.frameRate>0?playback.frameRate:facts.frameRate;
+  std::vector<Field> general;
+  if(playback.duration>0||facts.seconds>0)general.push_back({language?L"Duration":L"Длительность",FormatDuration(playback.duration>0?playback.duration:facts.seconds)});
+  if(width&&height){
+   unsigned a=width,b=height;while(b){unsigned r=a%b;a=b;b=r;}
+   general.push_back({language?L"Resolution":L"Разрешение",std::to_wstring(width)+L"×"+std::to_wstring(height)+L" · "+std::to_wstring(width/a)+L":"+std::to_wstring(height/a)});
+  }
+  if(fps>0)general.push_back({L"FPS",number(fps,3)});
+  if(facts.bytes)general.push_back({language?L"File size":L"Размер",bytes(facts.bytes)});
+  WIN32_FILE_ATTRIBUTE_DATA attributes{};
+  if(!currentPath.empty()&&GetFileAttributesExW(currentPath.c_str(),GetFileExInfoStandard,&attributes)){
+   SYSTEMTIME stamp{};if(FileTimeToSystemTime(&attributes.ftLastWriteTime,&stamp)){
+    wchar_t date[32];swprintf_s(date,L"%04u-%02u-%02u %02u:%02u",stamp.wYear,stamp.wMonth,stamp.wDay,stamp.wHour,stamp.wMinute);
+    general.push_back({language?L"Modified":L"Изменён",date});
+   }
+  }
+  section(language?L"GENERAL":L"ОСНОВНОЕ",general);
+  std::vector<Field> video;
+  auto container=fs::path(currentPath).extension().wstring();for(auto& c:container)c=towupper(c);
+  if(!container.empty())video.push_back({language?L"Container":L"Контейнер",container.substr(1)});
+  if(!facts.videoCodec.empty())video.push_back({language?L"Codec":L"Кодек",facts.videoCodec});
+  if(facts.bitrate)video.push_back({language?L"Bitrate":L"Битрейт",number(double(facts.bitrate)/1000000.0,1)+L" Mb/s"});
+  section(language?L"VIDEO":L"ВИДЕО",video);
+  std::vector<Field> audio;
+  if(!facts.audioCodec.empty())audio.push_back({language?L"Codec":L"Кодек",facts.audioCodec});
+  if(facts.channels)audio.push_back({language?L"Channels":L"Каналы",std::to_wstring(facts.channels)});
+  if(facts.sampleRate)audio.push_back({language?L"Sample rate":L"Частота",std::to_wstring(facts.sampleRate)+L" Hz"});
+  section(language?L"AUDIO":L"АУДИО",audio);
+  std::vector<Field> analysis={{language?L"Frame analysis":L"Анализ кадра",language?L"Histogram · Waveform · Vectorscope":L"Гистограмма · Waveform · Vectorscope"}};
+  section(language?L"ANALYSIS":L"АНАЛИЗ",analysis);
+  panelExtent=(std::max)(0.f,(y+panelScroll)-body.bottom+20);target->PopAxisAlignedClip();return;
+ }
  // Scrollable fields are clipped below the fixed header, same as the other
  // panels, so a scrolled row can never slide up underneath the title.
  target->PushAxisAlignedClip(D2D1::RectF(body.left,body.top+PanelHead-10,body.right,body.bottom),D2D1_ANTIALIAS_MODE_ALIASED);
@@ -2929,12 +3004,13 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
  Dc()->PushAxisAlignedClip(D2D1::RectF(body.left,body.top+PanelHead-10,body.right,body.bottom),D2D1_ANTIALIAS_MODE_ALIASED);
  Dc()->SetTransform(D2D1::Matrix3x2F::Translation((menuLevel?15.f:-15.f)*(1.f-progress),0)*Mat(outer));
  alpha*=progress;
- float enabled=(current&&!loading&&!actionBusy)?1.f:.35f;
+ bool videoReady=mediaMode.InVideo()&&!currentPath.empty();
+ float enabled=((videoReady||(current&&!loading))&&!actionBusy)?1.f:.35f;
  if(menuLevel==0){
   PanelRow(IdSend,IcShare,T(S_Send),p,alpha*enabled,true,p.text);
   PanelRow(IdSave,IcSave,T(S_Save),p,alpha*enabled,true,p.text);
   PanelRow(IdSaveAs,IcSaveAs,T(S_SaveAs),p,alpha*enabled,true,p.text);
-  PanelRow(IdPrint,IcPrint,T(S_Print),p,alpha*enabled,true,p.text);
+  if(!mediaMode.InVideo())PanelRow(IdPrint,IcPrint,T(S_Print),p,alpha*enabled,true,p.text);
   PanelRow(IdDelete,IcTrash,T(S_Delete),p,alpha*enabled,!confirmDelete,p.danger);
   if(confirmDelete){
    Write(T(S_RecycleAsk),D2D1::RectF(body.left+16,R(IdConfirmCancel).top-22,body.right-16,R(IdConfirmCancel).top-2),F_Small,Fade(p.dim,alpha));
@@ -2952,9 +3028,7 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
   SegmentedRow(IdWheelRow,IdWheelZoom,IdWheelNav,IcMouse,T(S_WheelLabel),T(S_WheelZoom),T(S_WheelNav),wheelMix.v,p,alpha);
   if(mediaMode.InVideo()){
    const Str syncNames[]={S_SyncAuto,S_SyncSmooth,S_SyncLatency};
-   const Str powerNames[]={S_PowerAuto,S_PowerPerformance,S_PowerEfficiency};
    PanelRow(IdSyncRow,IcPlay,T(S_SyncLabel),p,alpha,false,p.text,T(syncNames[int(syncPolicy)]));
-   PanelRow(IdPowerRow,IcDefault,T(S_PowerLabel),p,alpha,false,p.text,T(powerNames[powerMode]));
    PanelRow(IdSeekStep,IcForward,T(S_SeekStep),p,alpha,false,p.text,
             seekStepSeconds<7.5?(language?L"5 s":L"5 с"):(language?L"10 s":L"10 с"));
    const Str enhancementNames[]={S_EnhanceOff,S_EnhanceAuto,S_EnhanceOn};
@@ -2965,7 +3039,6 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
     const Str skips[]={S_SkipOff,S_SkipGentle,S_SkipAggressive};
     PanelRow(IdSilenceSkip,IcForward,T(S_SilenceSkip),p,alpha,false,p.text,T(skips[int(VideoModeSilenceSkip())]));
    }
-   PanelRow(IdDiagnostics,IcCopy,T(S_Diagnostics),p,alpha,false,p.text);
   }
   // AI subtitles are a download the viewer chooses, so the row says what it
   // costs and how to take it back (27.9): Download and the size, progress while
@@ -3002,17 +3075,19 @@ void PaintMenuPanel(D2D1_RECT_F body,const Palette& p,float alpha){
   // which is the only signal a person gets that the list has grown.
   PanelRow(IdDefaultApp,IcDefault,T(S_DefaultApp),p,alpha,true,p.text,
    viewerRegistered?T(S_On):nullptr);
-  PanelRow(IdSpacePreview,IcSpace,T(S_SpacePreview),p,alpha,false,p.text,T(autostart?S_On:S_Off));
+  if(!mediaMode.InVideo())
+   PanelRow(IdSpacePreview,IcSpace,T(S_SpacePreview),p,alpha,false,p.text,T(autostart?S_On:S_Off));
   if(tcStatus!=TcMissing)
    PanelRow(IdTotalCmd,IcDefault,L"Total Commander",p,alpha,false,p.text,T(tcStatus==TcInstalled?S_Remove:S_Install));
   PanelRow(IdLanguage,IcGlobe,T(S_Language),p,alpha,true,p.text);
+  if(mediaMode.InVideo())PanelRow(IdDiagnostics,IcCopy,T(S_Diagnostics),p,alpha,false,p.text);
   auto hairline=[&](float top,float bottom){
    float y=(top+bottom)/2;
    Ink()->SetColor(Fade(p.sep,alpha));
    Dc()->DrawLine(D2D1::Point2F(body.left+24,y),D2D1::Point2F(body.right-24,y),Ink(),1.f);
   };
   hairline(confirmDelete?R(IdConfirmDelete).bottom:R(IdDelete).bottom,R(IdDefaultApp).top);
-  hairline(R(IdSpacePreview).bottom,R(IdThemeRow).top);
+  hairline(mediaMode.InVideo()?R(IdDefaultApp).bottom:R(IdSpacePreview).bottom,R(IdThemeRow).top);
  }else{
   PanelRow(IdLangBack,IcChevronL,T(S_Language),p,alpha,false,p.dim);
   PanelRow(IdLangRu,nullptr,L"Русский",p,alpha,false,language==0?p.accent:p.text);
@@ -3889,6 +3964,12 @@ void Frame(){
    else{
     GfxGlassBegin();
     if(chromeAlpha>.01f){
+     // Keep the transport in compositor slot zero. Optional shell pieces,
+     // popups and preview cards can come and go; none may cause the live-blur
+     // effect behind the transport to be rebound to another rectangle.
+     float transportRadius=30.f;
+     auto transport=VideoModeControlGlass(viewport,chromeAlpha,transportRadius);
+     GfxGlassAdd(transport,transportRadius,chromeGlass);
      if(!pictureInPicture){
       GfxGlassAdd(R(IdBack),Bubble/2,chromeGlass);
       GfxGlassAdd(R(IdDockBar),Bubble/2,chromeGlass);
@@ -3903,10 +3984,10 @@ void Frame(){
      // blur it can have is the compositor's. Without this it reads as a pane of
      // clear plastic with text on it.
      if(panel!=PanelNone||panelSlide.v>.004f)GfxGlassAdd(R(IdPanelBody),22.f,chromeGlass);
-     float transportRadius=30.f;
-     auto transport=VideoModeControlGlass(viewport,chromeAlpha,transportRadius);
-     GfxGlassAdd(transport,transportRadius,chromeGlass);
-     GfxGlassAdd(VideoModePopupPanel(viewport),22.f,chromeGlass);
+     // Popup D2D tint and the live blurred source must share one spring.
+     // A constant opacity here was the source of the transparent/stale card
+     // during both opening and closing.
+     GfxGlassAdd(VideoModePopupPanel(viewport),22.f,chromeGlass*VideoModePopupOpacity());
      GfxGlassAdd(VideoModePreviewPanel(viewport),14.f,chromeGlass);
     }
     // What is being said, and what the viewer was just told, keep their glass
@@ -3934,7 +4015,10 @@ void Frame(){
    PaintPanel(p);
   }
   if(!videoOverlay)PaintToast(w,h,p);
-  if(loading&&!current)Write(T(S_Opening),D2D1::RectF(w/2-90,h-Margin-GalleryH-46,w/2+90,h-Margin-GalleryH-22),F_Meta,p.dim);
+  // Image loading owns this label. Video has no `current` bitmap by design,
+  // so testing only that pointer made a successfully playing film say
+  // "Opening…" forever.
+  if(loading&&!current&&!mediaMode.InVideo())Write(T(S_Opening),D2D1::RectF(w/2-90,h-Margin-GalleryH-46,w/2+90,h-Margin-GalleryH-22),F_Meta,p.dim);
   Dc()->PopLayer();
   if(videoOverlay){
    VideoModePaintSubtitles(videoViewport,videoChrome);
@@ -4046,16 +4130,32 @@ bool LoadPipGeometry(RECT& r,bool& pinned){
  return MonitorFromRect(&r,MONITOR_DEFAULTTONULL)!=nullptr&&right-left>=int(240*dpi);
 }
 
+// A PiP transition is a resize of this same HWND, sampled over the same
+// compact spring-like ease as the rest of the shell.  There is no second,
+// synthetic picture window and therefore no duplicate decode or hard cut.
+void MorphWindowTo(const RECT& target,HWND zOrder){
+ GetWindowRect(win,&windowAnimationFrom);
+ windowAnimationTo=target;windowAnimationMax=false;windowAnimationTime=0;
+ SetWindowPos(win,zOrder,windowAnimationFrom.left,windowAnimationFrom.top,
+  windowAnimationFrom.right-windowAnimationFrom.left,windowAnimationFrom.bottom-windowAnimationFrom.top,
+  SWP_NOACTIVATE|SWP_FRAMECHANGED);
+ windowAnimating=true;Wake();
+}
+
 // Picture in picture: the same window, small, always on top, with the same
 // transport inside it. Not a second window and not a second renderer -- the
 // film is already composited here, and a copy of it would cost a second decode.
 void TogglePictureInPicture(){
- static RECT restore{};
- static bool wasTopmost=false;
+ if(windowAnimating)return;
  if(!pictureInPicture){
   if(!mediaMode.InVideo())return;
-  GetWindowRect(win,&restore);
-  wasTopmost=(GetWindowLongW(win,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;
+  pipRestoreMaximized=WindowMaximized();
+  pipRestoreTopmost=(GetWindowLongW(win,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;
+  WINDOWPLACEMENT placement{sizeof(placement)};
+  pipRestoreValid=false;
+  if(pipRestoreMaximized&&GetWindowPlacement(win,&placement)){
+   pipRestoreBounds=placement.rcNormalPosition;pipRestoreValid=true;
+  }else pipRestoreValid=GetWindowRect(win,&pipRestoreBounds)!=FALSE;
   double aspect=videoAspect>0?videoAspect:16.0/9.0;
   int width=int(420*dpi),height=int(width/aspect);
   auto monitor=MonitorFromWindow(win,MONITOR_DEFAULTTONEAREST);
@@ -4077,12 +4177,20 @@ void TogglePictureInPicture(){
   }
   pictureInPicture=true;
   if(WindowMaximized())ShowWindow(win,SW_RESTORE);
-  SetWindowPos(win,pipPinned?HWND_TOPMOST:HWND_NOTOPMOST,x,y,width,height,SWP_FRAMECHANGED);
+  MorphWindowTo({x,y,x+width,y+height},pipPinned?HWND_TOPMOST:HWND_NOTOPMOST);
  }else{
   SavePipGeometry();
   pictureInPicture=false;
-  SetWindowPos(win,wasTopmost?HWND_TOPMOST:HWND_NOTOPMOST,restore.left,restore.top,
-   restore.right-restore.left,restore.bottom-restore.top,SWP_FRAMECHANGED);
+  if(pipRestoreMaximized){
+   SetWindowPos(win,pipRestoreTopmost?HWND_TOPMOST:HWND_NOTOPMOST,
+    pipRestoreBounds.left,pipRestoreBounds.top,
+    pipRestoreBounds.right-pipRestoreBounds.left,pipRestoreBounds.bottom-pipRestoreBounds.top,
+    SWP_NOACTIVATE|SWP_FRAMECHANGED);
+   ShowWindow(win,SW_MAXIMIZE);
+  }else if(pipRestoreValid){
+   MorphWindowTo(pipRestoreBounds,pipRestoreTopmost?HWND_TOPMOST:HWND_NOTOPMOST);
+  }
+  pipRestoreValid=false;pipRestoreMaximized=false;
  }
  ApplyCorners();
  SyncVideoSurface();
@@ -4626,9 +4734,13 @@ void Command(int id){
  case IdWinMin:ShowWindow(win,SW_MINIMIZE);return;
  case IdWinMax:SendMessageW(win,WM_SYSCOMMAND,WindowMaximized()?SC_RESTORE:SC_MAXIMIZE,0);return;
  case IdWinClose:Close();return;
- case IdSend:if(current&&!loading){if(Dirty())Notify(T(S_SaveFirst));else ShareImage(win,currentPath);}ClosePanel();return;
- case IdSave:Save(false);ClosePanel();return;
- case IdSaveAs:Save(true);ClosePanel();return;
+ case IdSend:{
+  bool videoReady=mediaMode.InVideo()&&!currentPath.empty();
+  if(videoReady||(current&&!loading)){if(current&&Dirty())Notify(T(S_SaveFirst));else ShareImage(win,currentPath);}
+  ClosePanel();return;
+ }
+ case IdSave:if(mediaMode.InVideo())SaveVideoCopy(false);else Save(false);ClosePanel();return;
+ case IdSaveAs:if(mediaMode.InVideo())SaveVideoCopy(true);else Save(true);ClosePanel();return;
  case IdPrint:if(current&&!loading){auto flat=Composite();if(flat)PrintImage(win,*flat,0);}ClosePanel();return;
  case IdDelete:confirmDelete=!confirmDelete;Wake();return;
  case IdConfirmCancel:confirmDelete=false;Wake();return;
@@ -5993,6 +6105,9 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   // the folder, which is what they have always meant there.
   if(mediaMode.InVideo()&&!control){
    if(wp==VK_SPACE){VideoModeTogglePlay();Wake();return 0;}
+   if(wp=='0'||wp=='1'){VideoModeResetZoom();Wake();return 0;}
+   if(wp==VK_ADD||wp==VK_OEM_PLUS){VideoModeSetZoom(VideoModeZoom()*1.25);Wake();return 0;}
+   if(wp==VK_SUBTRACT||wp==VK_OEM_MINUS){VideoModeSetZoom(VideoModeZoom()/1.25);Wake();return 0;}
    // Shift turns the arrows into a frame step (21.1), and the comma and full
    // stop do the same thing on their own -- the keys every other player in the
    // world uses for it, and the ones a hand already on the keyboard finds.
@@ -6113,6 +6228,10 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    int steps=int(wheelCarry);
    if(steps){wheelCarry-=float(steps);Navigate(-steps);}
    return 0;
+  }
+  if(mediaMode.InVideo()){
+   VideoModeSetZoom(VideoModeZoom()*pow(1.22,double(delta)));
+   Wake();return 0;
   }
   SetZoom(expf(zoomLog.target)*powf(1.22f,delta),x-w/2,y-h/2);
   return 0;
@@ -6425,6 +6544,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  // Video Mode's expand control drives the window the shell already animates,
  // rather than reaching for the window itself.
  VideoModeSetExpandHandler([]{AnimateWindow(!WindowMaximized());},[]{return WindowMaximized();});
+ VideoModeSetPipHandler([]{TogglePictureInPicture();},[]{return pictureInPicture;});
  // The system's own media controls. Attached to this window, which is what
  // makes the keyboard's play key reach this application rather than another.
  SmtcAttach(win,SystemTransport);

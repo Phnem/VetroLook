@@ -183,6 +183,9 @@ struct IPlaybackEngine{
  virtual void SetVolume(double percent)=0;
  virtual void SetMuted(bool muted)=0;
  virtual void SetSpeed(double speed)=0;
+ // Visual magnification of the decoded picture. 1.0 is the engine's normal
+ // fit/fill result; this is intentionally independent of window resizing.
+ virtual void SetVideoZoom(double scale)=0;
 
  // The surface the engine renders into, in device pixels. The shell owns the
  // window, so the engine is told how large its output should be rather than

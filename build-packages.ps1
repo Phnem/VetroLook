@@ -7,10 +7,12 @@ parallel. Output lands in .\release\:
   release\VetroLook-<version>-x64.msix    (unsigned, for Microsoft Store submission)
   release\SHA256SUMS.txt
   release\VetroLook-<version>-Portable.zip   (unless -SkipPortable)
+  release\VetroLook-Clean-Uninstall.exe      (standalone legacy cleanup tool)
 
-None of these ship a separate uninstaller executable -- each format manages
-its own removal (Inno's generated uninstaller, msiexec, or Windows/Store for
-MSIX) and shows up under Settings > Apps > Installed apps.
+The product installers manage their own removal (Inno's generated uninstaller,
+msiexec, or Windows/Store for MSIX) and show up under Settings > Apps. The
+separate Clean Uninstaller removes legacy registrations, caches and abandoned
+installs when an old manual installation is inconsistent.
 
 Usage:
   .\build-packages.ps1                  # build app if missing, then package all three
@@ -88,6 +90,12 @@ foreach ($j in $jobs) {
     Remove-Job -Job $j -Force
 }
 
+Write-Host "----- Clean Uninstaller -----"
+$cleanUninstaller = Join-Path $PackagingDir 'uninstall\build-clean-uninstaller.ps1'
+& $cleanUninstaller -OutDir $ReleaseDir
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw 'Clean Uninstaller build failed' }
+$targets += @{ Name = 'Clean uninstall'; File = 'VetroLook-Clean-Uninstall.exe'; Script = $null }
+
 if (-not $SkipPortable) {
     Write-Host "----- Portable -----"
     $portableZip = Join-Path $ReleaseDir "VetroLook-$Version-Portable.zip"
@@ -152,6 +160,6 @@ Write-Host "  [OK]   SHA256SUMS -> $sumsPath"
 
 if (-not $allOk) { exit 1 }
 
-$releaseAssets = "VetroLook-$Version-Setup.exe, VetroLook-$Version-x64.msi, " + $(if ($SkipMsix) { '' } else { "VetroLook-$Version-x64.msix, " }) + "SHA256SUMS.txt"
+$releaseAssets = "VetroLook-$Version-Setup.exe, VetroLook-$Version-x64.msi, VetroLook-Clean-Uninstall.exe, " + $(if ($SkipMsix) { '' } else { "VetroLook-$Version-x64.msix, " }) + "SHA256SUMS.txt"
 if (-not $SkipPortable) { $releaseAssets += ", VetroLook-$Version-Portable.zip (optional)" }
 Write-Host "`nGitHub Release assets (release\): $releaseAssets"

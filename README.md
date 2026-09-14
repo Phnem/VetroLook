@@ -4,20 +4,20 @@
 
 # VetroLook
 
-### A fast, native and beautifully minimal photo and video viewer for Windows.
+### A fast, native and beautifully minimal image viewer for Windows.
 
-**Instant photos. Smooth films. Subtitles made on your own PC. No cloud required.**
+**Instant viewing. Smart photo library. Fluid interactions. No cloud required.**
 
 <br>
 
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=flat-square&logo=windows11&logoColor=white)](#)
 [![C++](https://img.shields.io/badge/C%2B%2B-Native-00599C?style=flat-square&logo=cplusplus&logoColor=white)](#)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/Phnem/VetroLook?style=flat-square)](https://github.com/Phnem/VetroLook/releases/latest)
+[![Status](https://img.shields.io/badge/status-active%20development-orange?style=flat-square)](#development-status)
 
 <br>
 
-<img src="docs/assets/hero.png" width="900" alt="VetroLook viewer">
+<img src="docs/assets/hero.png" width="900" alt="VetroLook">
 
 </div>
 
@@ -25,346 +25,415 @@
 
 ## What is VetroLook?
 
-**VetroLook** is a native Windows viewer for photos and films, built around one idea:
+**VetroLook** is a native Windows image viewer and photo library built around one simple idea:
 
-> Opening a file should feel instant — and whatever it is, it should open in the same calm window.
+> Viewing an image should feel instant.
 
-A photograph and a film are two modes of one viewer. The window, the glass
-interface, the folder navigation and the keyboard stay the same; what changes
-is what the content needs. There is no separate player, no import step, no
-account and no upload.
+Windows already has powerful hardware, codecs and graphics APIs, yet opening a photo often still feels slower and heavier than it should.
 
 VetroLook aims to combine:
 
 - the immediacy of **Quick Look**
-- the polish of **macOS Photos / Preview**
-- the playback quality of **mpv**
+- the simplicity and polish of **macOS Photos / Preview**
 - the speed of classic native Windows viewers
+- a modern photo library that works directly with your existing folders
 
-## What's new in 2.1
+without requiring you to import your collection into a proprietary database or upload anything to the cloud.
 
-2.1 turns VetroLook into a video player without making it a heavier photo viewer.
+## v1.1 highlights
 
-- **Video Mode** — films play in the same window, composited underneath the glass interface, with hardware decoding, display-synced pacing and HDR output.
-- **Timeline previews** — hover the timeline and the frame you are heading for appears above it, from a second decoder that never disturbs playback.
-- **Frame-accurate stepping** — one frame forward or back with `,` and `.`.
-- **Subtitles in the Vetro Bubble** — plain dialogue is drawn on frosted glass that morphs between lines; authored typesetting stays exactly as its author placed it.
-- **AI subtitles, generated locally** — Whisper transcribes the film's speech on your own machine, minutes ahead of where you are.
-- **Streams** — direct links, HLS and DASH, live streams with a DVR window, and reconnecting after a dropped connection.
-- **RTX Video Super Resolution** — on NVIDIA RTX cards, films shown larger than their resolution are upscaled by the driver.
-- **Picture in picture, Windows media controls, resume, chapters, A-B loop, screenshots** — and a session that comes back after an unexpected exit.
+Version 1.1 focuses on the path between selecting a file and seeing a stable
+image. JPEG, PNG, TIFF and static WebP now choose a screen-sized decode or
+scale path where their decoders support it; PSD/PSB screen viewing streams
+rows instead of materialising a full-size BGRA image. RAW embedded previews
+are ranked by useful dimensions before decode. The app keeps the trusted AVIF
+decode path where the platform decoder does not match it closely enough.
 
-The full list is in [CHANGELOG.md](CHANGELOG.md).
-
----
-
-## ✦ Designed around the content
-
-VetroLook avoids traditional toolbars, giant menus and heavy application chrome.
-The interface floats above the photo or the film as soft, matte glass — and over
-a film that glass is the film itself, blurred live by the Windows compositor.
-
-Every interaction is designed around subtle physical motion: springs, inertia,
-compressed press states, shared-element transitions and GPU-driven transforms.
-Controls collapse into the point they stand on when they leave, rather than
-simply fading out.
-
-The goal is not simply to make VetroLook *look* modern. It should **feel physical**.
+The shipped MSI, Inno Setup installer, MSIX, and portable ZIP now all carry
+the Lensfun profile database and the runtime notices required by the viewer.
 
 ---
 
-## 🎬 Video Mode
+## ✦ Designed around the image
 
-### Playback
+VetroLook avoids traditional Windows toolbars, giant menus and heavy application chrome.
 
-- libmpv as the playback engine, rendering through `gpu-next` into VetroLook's own DirectComposition tree — no second window, no foreign controls
-- hardware decoding where the GPU supports the codec (H.264, HEVC, VP9, AV1 and more), software otherwise
-- frame pacing matched to the display: exact refresh rates, display-resampled playback where the cadence allows it
-- HDR output on HDR displays, tone mapping on SDR ones, wide-gamut handling
-- a **Resource Governor** that protects the picture first: previews, background indexing, AI work and even the glass blur give way before a frame is dropped
+The interface floats directly above the image using a soft, matte glass visual language.
 
-Measured on a 1080p/24 fps film (RTX 3060 Ti, 180 Hz display): 24.00 fps shown,
-0 dropped, 0 late, audio/video offset 0.001 s.
+<div align="center">
 
-### Navigation
+<img src="docs/assets/viewer.png" width="900" alt="VetroLook Viewer">
 
-- hover the timeline for live frame previews (first frame about 50 ms, then about 26 ms per new position on a 1080p film)
-- `,` / `.` step one frame back or forward, exactly
-- chapters with `PageUp` / `PageDown`
-- the next film in the folder follows automatically
+</div>
 
-### Subtitles
+### The viewer includes
 
-- embedded and sidecar subtitles (`film.srt`, `film.ru.srt`, `Subs/` folders) load automatically
-- each cue is classified: plain dialogue goes to the **Vetro Bubble**, while positioned signs, karaoke, rotation and bitmap subtitles (PGS, VobSub) are left to libass, untouched
-- the bubble holds its shape through the ordinary pauses of a conversation and collapses into a point after a real silence
-- subtitle and audio delay, remembered per film
-
-### AI subtitles
-
-Films without subtitles can get them from **Whisper**, running entirely on your computer.
-
-- open the **…** menu and choose **AI subtitles · Download** once (about 1.2 GB): the whisper.cpp runtime, the Silero speech detector and the large-v3-turbo model are fetched from their official sources, checked against their published SHA-256 and stored in `%LOCALAPPDATA%\VetroLook`
-- press `A` during a film: speech is transcribed a few minutes ahead of the playhead and shown in the same bubble as ordinary subtitles
-- silence is never sent to the model, and lines a model tends to invent (subtitle credits, looping phrases, doubtful words over non-speech) are filtered out
-- transcripts are kept, so a film opens with its subtitles ready next time; `Shift+A` saves them beside the film as `film.<language>.ai.srt`
-- **Skip silence** (Gentle / Aggressive) for lectures and recordings
-- transcription waits whenever playback needs the machine
-
-On an RTX 3060 Ti a minute of audio is transcribed in about 1.5 seconds, with no late frames in the film.
-**Audio never leaves your device.** None of this is included in the installers.
-
-### Streams
-
-- open a direct link, an HLS or a DASH address from the command line or with `Ctrl+V`
-- live streams show **LIVE** instead of a length; the timeline is the window kept since joining, and `End` returns to the live edge
-- a dropped connection is reopened with backoff (1, 2, 4, 8, 16 s, then every 30 s) at the position it had reached
-- failures are explained in a sentence — address gone, access refused, certificate not trusted, DRM-protected service
-- links to web pages work when `yt-dlp.exe` is placed in a `resolver` folder beside VetroLook; it runs out of process with a time and memory limit, and is not included
-
-### Enhancement and windows
-
-- **RTX Video Super Resolution** (Off / Auto / On): Auto upscales only a real enlargement, on mains power, never inside a small picture-in-picture window
-- **Picture in picture** (`P`): the same window, small and on top; it remembers its place per monitor arrangement, settles into corners and pins with `T`
-- the film appears in the **Windows media controls** — lock screen, volume overlay and the keyboard's media keys
-- films reopen where you left them; after an unexpected exit, the next start brings the film back
-
----
-
-## 🖼 Photos
-
-### The viewer
-
-- smooth zoom and pan, Fit / 1:1
-- instant folder navigation and a floating filmstrip
-- rotation, crop and lightweight drawing tools
-- copy, favourites and file operations
-- image information with EXIF, lens data and GPS with a link to Maps
-- RGB / luma histogram with highlight and shadow clipping analysis
+- smooth zoom and pan
+- Fit / 1:1 switching
+- instant folder navigation
+- floating filmstrip gallery
+- copy to clipboard
+- favorites
+- rotation
+- lightweight editing tools
+- file operations
+- image information
+- EXIF metadata
+- RGB / luma histogram with highlight/shadow clipping analysis
+- GPS location, with a direct link to open it in Maps
 - dark and light appearance
 
-Measured in 2.1 on the bundled test images: median next/previous photo in about
-5.6 ms, no transition slower than 16 ms across 414 steps.
+Every interaction is designed around subtle physical motion:
 
-### Quick preview
+- springs
+- inertia
+- compressed press states
+- elastic gallery movement
+- shared-element transitions
+- GPU-driven transforms
 
-Select an image in Explorer and press **Space** — VetroLook opens it in place,
-the same idea as macOS Quick Look. Opening a file directly keeps the full
-navigation model: Back goes to the parent folder, then to the library.
+The goal is not simply to make VetroLook *look* modern.
 
-### Smart Library
+It should **feel physical**.
 
-VetroLook builds a photo library from the images already on your computer.
-There is no import and the files stay where they are.
+---
 
-- folders containing images appear automatically, as real folder cards
-- **Folder Families** group generic sibling folders (`assets`, `renders`, `output`) without moving a file
-- **Photos View** browses every indexed photo as one searchable, sortable grid
-- **Photo Stacks** collapse RAW+JPEG and edited copies conservatively
-- NTFS MFT/USN fast-path indexing when elevated, with an automatic non-admin fallback, and stable file identity independent of the path
+## ⌨ Quick preview
 
-### Supported formats
+VetroLook is designed to work naturally with Windows Explorer. Select an image, press **Space**, and it opens instantly in place — the same idea as macOS Quick Look.
 
-**Photos:** JPEG, PNG, BMP, TIFF, ICO, GIF (first frame), WebP, AVIF, HEIC/HEIF,
-PSD, PSB, OpenEXR, and camera RAW via LibRaw (CR2, CR3, NEF, ARW, DNG, RAF, RW2,
-ORF, PEF and more).
+This relies on a background instance staying alive to catch the key from anywhere in Explorer, so it is a toggle ("Open with Space") rather than something silently forced on; turning it on registers VetroLook to start with Windows.
 
-**Films and audio:** MP4, MKV, MOV, WebM, AVI, TS/M2TS, WMV, FLV, OGV, 3GP and
-more, plus MP3, FLAC, AAC, WAV, Opus and other audio formats — decoded by libmpv.
+Opening a file directly (double-click, "Open with", or Quick Preview) still keeps the full navigation model — Back always makes sense, even though the app was never actually browsed into that state:
+
+```text
+Explorer
+   ↓
+Viewer
+   ↓ Back
+Parent folder
+   ↓ Back
+Global library
+```
+
+No disconnected viewer window. No losing context.
+
+## Smart Library
+
+VetroLook can build a photo library directly from the images already present on your computer. There is no import process and the files stay exactly where they are.
+
+On first launch VetroLook indexes supported images and groups them by their real filesystem locations. Afterwards the library is maintained incrementally instead of repeatedly crawling every directory: a background watcher picks up changes while the app runs, and a cheap re-check at startup catches anything that happened while it was closed.
+
+### NTFS indexing architecture
+
+```text
+NTFS
+ │
+ ├── MFT / FSCTL_ENUM_USN_DATA          (fast path, needs elevation)
+ │          ↓
+ │    initial file index
+ │
+ └── USN Change Journal                 (fast path, catch-up after being closed)
+            ↓
+      incremental updates
+            ↓
+       VetroLook Index
+```
+
+Opening a raw volume handle for the fast path needs elevated privileges — a Windows restriction, not a choice VetroLook makes. Without it, VetroLook transparently falls back to an ordinary recursive directory scan plus live change notifications, so normal, non-admin use is never blocked; it's simply a slower way to reach the same index.
+
+Every indexed file and folder gets an identity independent of its path: on NTFS this is the volume serial number plus the file's own NTFS file ID, so renaming or moving a file never loses its place in the library.
+
+## Folder View
+
+Instead of inventing fake AI categories such as Food, People or Travel, VetroLook starts with something deterministic: your actual filesystem.
+
+```text
+Downloads
+Pictures
+DCIM
+project_n
+renders
+assets
+Screenshots
+RAW
+...
+```
+
+Folders containing supported images automatically appear in the library. Folder cards look like folders — a tab and body, not a flat photo stack — with a handful of the photos inside them fanned out and tucked into the opening.
+
+<div align="center">
+
+<img src="docs/assets/library.png" width="900" alt="VetroLook Library">
+
+</div>
+
+### Folder Families
+
+Real filesystems can become messy:
+
+```text
+project_n/
+├── assets/
+├── renders/
+└── output/
+```
+
+When several sibling folders share a common, generic name (`assets`, `renders`, `output`, `screenshots`, and similar), VetroLook already groups them into one virtual family in the library — without moving a single file:
+
+```text
+project_n
+1,284 photos · 3 locations
+```
+
+A family can be split back into its separate folders per-folder, and the choice is remembered. Grouping by capture-time range, camera metadata or visual similarity — for folders that don't happen to share a generic name — is not implemented yet.
+
+## Photos View
+
+Folders are only one way to browse a photo collection. Switch to Photos View to ignore folder boundaries and browse every indexed photo as one flat, virtualized grid — searchable, sortable and filterable the same way as the folder view. Grouping that grid by capture date into a day-by-day timeline (Today / Yesterday / by month) is planned but not built yet.
+
+## Photo Stacks
+
+A single photograph may exist as multiple files:
+
+```text
+IMG_3381.NEF
+IMG_3381.JPG
+IMG_3381_edit.JPG
+```
+
+VetroLook already collapses these into a single stack in the grid when it's confident about the relationship — same folder, same filename stem, and either a RAW+JPEG pair or a plain+edited pair. It deliberately stays conservative: files it isn't sure about are left separate rather than guessing. This uses filenames and folder structure only, no machine-learning model.
+
+Automatically detecting bursts (several near-identical shots taken seconds apart) or near-duplicate/similar photos is planned but not implemented yet.
+
+## Image Information
+
+The floating Info panel provides technical information without covering the image with permanent UI.
+
+<div align="center">
+
+<img src="docs/assets/info.png" width="500" alt="VetroLook Info panel">
+
+</div>
+
+Available information includes:
+
+**File** — filename, format, dimensions, orientation, DPI, file size, full path (copy to clipboard), transparency, HDR/SDR, JPEG encoding type.
+
+**Camera** (when EXIF is available) — camera, lens, focal length, aperture, shutter speed, ISO, and more.
+
+**Location** (when GPS EXIF is available) — coordinates, with a direct "Open in Maps" link.
+
+**Analysis** — RGB and luminance histogram, with a live hover readout of the exact channel values under the cursor, plus highlight/shadow clipping shown as real toggles with an inline percentage that can also overlay the clipped regions directly on the photo.
+
+Sections that would be empty or meaningless for a given file (no EXIF, no GPS) are simply not shown.
+
+Heavy metadata and histogram work happens off the UI thread, so opening the panel never stalls the viewer.
+
+## Supported formats
+
+VetroLook is built around a modular decoder pipeline.
+
+**Standard images:** JPEG, PNG, GIF, BMP, TIFF, ICO
+
+**Modern formats:** WebP, AVIF, HEIC / HEIF
+
+**Camera RAW** (via LibRaw): CR2, CR3, NEF, ARW, DNG, RAF, RW2, ORF, PEF, and other LibRaw-supported formats
+
+**Professional / HDR:** OpenEXR (tone-mapped for display)
 
 JPEG XL is not supported yet.
 
----
-
-## ⌨ Keyboard
-
-| Key | Photos | Films |
-| --- | --- | --- |
-| `Space` | Quick preview (from Explorer) | Play / pause |
-| `←` `→` | Previous / next file | Seek 5 or 10 s |
-| `Ctrl` + `←` `→` | — | Previous / next file |
-| `,` `.` | — | One frame back / forward |
-| `PageUp` `PageDown` | — | Chapters |
-| `Z` / `Shift+Z` | — | Subtitle delay |
-| `X` / `Shift+X` | — | Audio delay |
-| `A` / `Shift+A` | — | AI subtitles / save them |
-| `S` | — | Save the frame |
-| `L` | — | A-B loop |
-| `P` / `T` | — | Picture in picture / pin it |
-| `End` | — | Back to live |
-| `Ctrl+V` | — | Open an address from the clipboard |
-| `R` / `Shift+R` | Rotate | — |
-| `0` / `1` | Fit / 100 % | — |
-| `Ctrl+O` | Open | Open |
-
----
-
-## Download
-
-Get the latest release from [Releases](https://github.com/Phnem/VetroLook/releases/latest):
-
-- `VetroLook-<version>-Setup.exe` — standard installer
-- `VetroLook-<version>-x64.msi` — Windows Installer package
-- `VetroLook-<version>-Portable.zip` — no installation
-- `SHA256SUMS.txt` — checksums for every download
-
-Windows 10 / 11 x64. An NVIDIA GPU is recommended for AI subtitles and required for RTX Video Super Resolution.
-
 ## Native performance
 
-VetroLook deliberately avoids browser-based UI frameworks.
+VetroLook deliberately avoids heavyweight browser-based UI frameworks. The application is built around native Windows technologies and native image libraries.
 
 ```text
 VetroLook
 │
-├── Win32 · Direct3D 11 · Direct2D · DirectComposition · DirectWrite · WIC
+├── Win32
+├── Direct2D
+├── DirectComposition
+├── DirectWrite
+├── WIC
 │
-├── Photos:  libjpeg-turbo · Wuffs · libwebp · libavif · dav1d · LibRaw · TinyEXR · Exiv2
-├── Films:   libmpv (loaded at run time, only when a film is opened)
-└── AI:      whisper.cpp (downloaded on request, loaded only when used)
+├── libjpeg-turbo
+├── Wuffs
+├── libwebp
+├── libavif
+├── dav1d
+├── LibRaw
+└── TinyEXR
 ```
 
-- decoding, metadata, previews and transcription all run off the UI thread
-- opening a photograph never loads the playback engine or the AI runtime
-- every queue and cache is bounded by what the machine actually has
-- generations everywhere: work started for a file or a position you have left never comes back as current
+Performance principles:
 
-### Benchmarks from 1.1
+- asynchronous image decoding, off the UI thread
+- thumbnail-size decoding instead of unnecessary full-resolution loads
+- prefetching adjacent images for instant next/previous
+- cancellation of obsolete decode jobs when you move on before they finish
+- a virtualized grid — only the folders/photos actually on screen ever get a bitmap
+- bounded in-memory caches
+- GPU composition for interface animations
 
-Windows x64 GUI measurements on the same machine and image fixtures, taken for
-the 1.1 release. Lower is better.
+A disk-persistent thumbnail cache (surviving app restarts, with size-bucketed entries and LRU eviction) is planned; today's thumbnail cache is in-memory only and rebuilds each session.
 
-| App | First photo after cold start | Open a camera RAW file |
-| --- | ---: | ---: |
-| **VetroLook** | **641 ms** | **637 ms** |
-| Windows Photos | 1,079 ms | 939 ms |
-| ImageGlass | 1,358 ms | 790 ms |
-| ACDSee Free | 3,342 ms | 3,322 ms |
-| FastRawViewer | 1,810 ms | 1,801 ms |
+## Motion system
 
-| Scenario | VetroLook | ACDSee Free | FastRawViewer |
-| --- | ---: | ---: | ---: |
-| Next standard photo | **14.9 ms** | 74.5 ms | 72.4 ms |
-| Random standard photos | **18.4 ms** | 61.2 ms | 72.6 ms |
-| Next camera RAW | **15.3 ms** | 61.1 ms | 85.3 ms |
-| Random camera RAW | **14.8 ms** | 61.7 ms | 79.5 ms |
-| Switch between formats | **15.5 ms** | 72.6 ms | 73.4 ms |
+Navigation in VetroLook is spatial rather than page-based.
+
+**Folder → Photos** — the folder card compresses and its visible preview thumbnails physically fly out into their positions in the new photo grid, with a slight stagger, while the rest of the screen cross-fades.
+
+```text
+Folder
+  ↓
+photos rise out
+  ↓
+shared-element transition
+  ↓
+Photo Grid
+```
+
+**Photo → Viewer** — the clicked thumbnail becomes the viewer image: its cached preview stands in immediately while the full-resolution decode happens in parallel and crossfades in seamlessly.
+
+```text
+Thumbnail
+    ↓
+position + scale + radius morph
+    ↓
+Viewer
+```
+
+Closing performs the transition in reverse, landing back on the exact thumbnail it came from (auto-scrolling the grid into view first if needed). The intention is that you perceive the same object changing state, not one screen replacing another.
+
+## Drag & Drop
+
+VetroLook supports native Windows OLE drag-and-drop. Photos can be dragged directly from the library into other applications.
+
+```text
+VetroLook
+   ↓
+IDataObject / CF_HDROP
+   ↓
+Explorer / editor / upload target
+```
+
+The real underlying file is transferred, not a rendered bitmap copy.
 
 ## Privacy
 
-VetroLook is local-first. Your library, thumbnails, metadata, search, resume
-positions and AI transcripts stay on your computer. AI subtitles run on your own
-hardware; the only network access they need is the one-time download you start
-yourself. Streams are fetched only when you open them.
+VetroLook is a local-first application. Your photo library does not need to be uploaded anywhere — indexing, thumbnails, metadata and search all run directly against your local files.
 
 ## Development status
 
+VetroLook is under active development.
+
 **Implemented**
 
-- photo viewer with the formats above, info panel, histogram, GPS
-- folder library with persistent, incrementally updated indexing, Folder Families, Photo Stacks, Photos View
-- shared-element transitions, drag and drop, Explorer Space preview
-- Video Mode with libmpv composition, hardware decode, frame pacing, HDR
-- timeline previews, frame stepping, chapters, resume, A-B loop, screenshots
-- subtitle classification, Vetro Bubble, sidecar subtitles
-- AI subtitles with Whisper, speech detection, silence skip, export
-- direct, HLS, DASH and live streams, reconnect, page resolver interface
-- RTX Video Super Resolution, picture in picture, Windows media controls, session restore
-- Inno Setup, MSI and portable packages
+- Native image viewer with the format set listed above
+- Zoom / pan, Fit / 1:1
+- Floating viewer controls with idle auto-hide
+- Image Info panel, histogram with clipping analysis, GPS → Maps link
+- Folder library with persistent, incrementally-updated indexing
+- NTFS MFT/USN fast-path indexing (elevated), with an automatic non-admin fallback
+- Stable file identity independent of path (NTFS file ID based)
+- Search, filtering and sorting across both folder and photo views
+- Folder Families (generic sibling-name grouping)
+- Photo Stacks (RAW/JPEG and edit/plain grouping)
+- Real shared-element transitions, both Folder→Photos and Photo→Viewer
+- Native OLE drag-and-drop (CF_HDROP)
+- Direct-file navigation context (Explorer → Viewer → folder → library, synthesized when needed)
+- Quick Look-style Space preview from Explorer
+- Standard installer packages (Inno Setup, MSI, MSIX) with OS-managed uninstall
 
-**Planned**
+**In progress**
 
-- disk-persistent thumbnail cache and date-based timeline
-- burst and near-duplicate detection
-- JPEG XL
-- screen reader support through UI Automation
-- a speech activity strip on the timeline
+- Disk-persistent thumbnail cache (currently in-memory only)
+- Date-based timeline for Photos View
+- Event and burst detection
+- Similar/near-duplicate photo detection
+- Broader Folder-Family signals beyond generic sibling names
+- JPEG XL decoding
+- Further indexing and performance hardening
 
 ## Building
 
-Requirements:
+Typical requirements:
 
 ```text
 Windows 10 / 11
-Visual Studio 2022 (MSVC, C++20) with CMake
+Visual Studio 2022 (MSVC, C++20)
+CMake 3.25+
 Windows SDK
-Python 3 (build.ps1 installs meson and ninja for dav1d)
-7-Zip (to unpack the pinned libmpv package)
 Git
 ```
 
-Build everything, including the dav1d and libmpv dependencies:
+Clone and configure:
 
-```powershell
+```bash
 git clone https://github.com/Phnem/VetroLook.git
 cd VetroLook
-.\build.ps1
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 ```
 
-`build.ps1` builds dav1d, fetches NASM for libjpeg-turbo's SIMD code, fetches
-the pinned libmpv development package (`tools/fetch-mpv.ps1`, SHA-256 checked),
-then configures and builds `VetroLook.exe`. The executable and `libmpv-2.dll`
-are written to `dist/`.
+Build:
 
-Tests are separate targets, for example:
-
-```powershell
-cmake --build build --config Release --target VetroMediaTests VetroQualityTests VetroTranscriptTests VetroEnhanceTests
+```bash
+cmake --build build --config Release --target VetroLook
 ```
 
-Release packages:
-
-```powershell
-.\build-packages.ps1 -SkipAppBuild -SkipMsix
-```
-
-The implementation history of Video Mode, stage by stage, is in [docs/STAGES.md](docs/STAGES.md).
+The resulting `VetroLook.exe` is written to `dist/`. Build commands may change while the project is under active development — check `CMakeLists.txt` for the current target names.
 
 ## Project philosophy
 
-**01 — Fast first.** A viewer should never make the user wait unnecessarily.
+VetroLook follows a few strict principles.
+
+**01 — Fast first.** A photo viewer should never make the user wait unnecessarily.
 
 **02 — Files stay yours.** The filesystem remains the source of truth.
 
-**03 — No forced cloud.** Nothing needs to be uploaded — not your photos, not your films' audio.
+**03 — No forced cloud.** Photo management should not require uploading your collection.
 
-**04 — The picture comes first.** Background work, previews, AI and even the interface's glass give way before a frame is late.
+**04 — No heavyweight AI dependency.** Metadata, filesystem structure and lightweight heuristics should solve a problem before machine learning is introduced.
 
 **05 — Motion has meaning.** Animations communicate where objects came from and where they are going.
 
-**06 — UI stays out of the way.** The photo or the film is always the most important thing on screen.
+**06 — UI stays out of the way.** The photo is always the most important element on screen.
 
 ## Why the name VetroLook?
 
-*Vetro* — glass. The interface is translucent, floating surfaces around the content, never competing with it.
+*Vetro* — glass. The name reflects the interface language of the project: translucent, floating surfaces surrounding the content without competing with it.
 
-*Look* — exactly what the application is for. Open. Look. Move on.
+*Look* — exactly what the application is built for. Open. Look. Move on.
 
 ## Acknowledgements
 
-VetroLook uses and learns from excellent open-source projects, including
-mpv / libmpv, FFmpeg, libplacebo, whisper.cpp and ggml, Silero VAD, QuickView,
-QuickLook, libjpeg-turbo, Wuffs, libwebp, libavif, dav1d, LibRaw, TinyEXR, Exiv2
-and Lensfun.
+VetroLook uses and learns from excellent open-source projects and libraries including:
 
-Their licenses and copyright notices remain applicable; see
-[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and [LICENSE_AUDIT.md](LICENSE_AUDIT.md).
+- QuickView
+- QuickLook
+- libjpeg-turbo
+- Wuffs
+- libwebp
+- libavif
+- dav1d
+- LibRaw
+- TinyEXR
 
-VetroLook is inspired by interaction concepts found in macOS Quick Look, Preview
-and Photos, but is not affiliated with Apple. RTX is a trademark of NVIDIA.
+Their respective licenses and copyright notices remain applicable. See the repository's third-party notices for details.
+
+VetroLook is inspired by interaction concepts found in products such as macOS Quick Look, Preview and Photos, but is not affiliated with Apple.
 
 ## License
 
-VetroLook is distributed under the GNU General Public License v3.0. See `LICENSE`
-for the full text. Third-party components are distributed under their own,
-compatible licenses.
+VetroLook is distributed under the GNU General Public License v3.0. See `LICENSE` for the full license text. Some bundled or referenced third-party components are distributed under their own, compatible licenses.
 
 ---
 
 <div align="center">
 
 **VetroLook**
-Your photos. Your films. Instantly.
+Your photos. Your files. Instantly.
 Made for Windows.
 
 </div>

@@ -222,14 +222,31 @@ void UnregisterViewer(){
 // Rewriting the paths at startup makes that self-healing, but only when a
 // registration already exists: an app that was never registered must not start
 // claiming file associations on its own.
+//
+// And only when the registered executable is really gone. A registration that
+// points at another copy which still exists -- the installed one, while a
+// portable copy or a build is run from somewhere else -- belongs to that copy.
+// Taking it over made "Open with" follow whichever copy was started last, and
+// left every entry pointing at nothing once that copy's folder was deleted.
 void RepairRegistrationIfStale(){
  auto exe=ExecutablePath();
  if(exe.empty())return;
- bool registered=false,stale=false;
  wchar_t buffer[32768]{};DWORD size=sizeof(buffer);
  auto key=std::wstring(L"Software\\Classes\\")+ProgId+L"\\shell\\open\\command";
- if(RegGetValueW(HKEY_CURRENT_USER,key.c_str(),nullptr,RRF_RT_REG_SZ,nullptr,buffer,&size)==ERROR_SUCCESS){registered=true;stale=std::wstring(buffer).find(exe)==std::wstring::npos;}
- if(registered&&stale){std::wstring ignored;RegisterAsViewer(ignored);}
+ if(RegGetValueW(HKEY_CURRENT_USER,key.c_str(),nullptr,RRF_RT_REG_SZ,nullptr,buffer,&size)!=ERROR_SUCCESS)return;
+ std::wstring command=buffer;
+ if(command.find(exe)!=std::wstring::npos)return;           // it is already this copy
+ // The command is "C:\path\VetroLook.exe" "%1": the executable is the first
+ // quoted part.
+ std::wstring registered;
+ if(!command.empty()&&command[0]==L'"'){
+  auto close=command.find(L'"',1);
+  if(close!=std::wstring::npos)registered=command.substr(1,close-1);
+ }
+ if(registered.empty())return;
+ if(GetFileAttributesW(registered.c_str())!=INVALID_FILE_ATTRIBUTES)return;   // that copy still exists
+ std::wstring ignored;
+ RegisterAsViewer(ignored);
 }
 
 void OpenDefaultAppsPage(){
