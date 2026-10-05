@@ -111,6 +111,10 @@ void VideoModeSetExpandHandler(void(*toggle)(),bool(*expanded)());
 // that transition; ownership of the HWND and its restore geometry stays with
 // the shell.
 void VideoModeSetPipHandler(void(*toggle)(),bool(*active)());
+// Closes playback UI that cannot survive a window-mode morph (track/rate
+// popups, timeline preview and active drags). The shell calls this before
+// entering or leaving PiP so no detached glass is carried into the new shape.
+void VideoModeDismissTransientUi();
 bool VideoModeShowingVideo();          // the engine's picture is on screen
 const PlaybackSnapshot& VideoModeSnapshot();
 

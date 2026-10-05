@@ -209,6 +209,7 @@ static std::shared_ptr<Image> WicRenderReady(const std::vector<uint8_t>& data,
    auto out=Allocate(tw,th);
    if(SUCCEEDED(transform->CopyPixels(nullptr,tw,th,&format,WICBitmapTransformRotate0,
                                       tw*4,UINT(out->pixels.size()),out->pixels.data()))){
+    for(size_t i=3;i<out->pixels.size();i+=4)if(out->pixels[i]<255){out->hasAlpha=true;break;}
     out->sourceW=sourceW;out->sourceH=sourceH;out->tier=TierScreenRes;
     out->codec=L"Windows WIC source transform";
     return out;
@@ -225,6 +226,7 @@ static std::shared_ptr<Image> WicRenderReady(const std::vector<uint8_t>& data,
                                        WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom)));
  auto out=Allocate(wantedW,wantedH);
  Check(SUCCEEDED(converter->CopyPixels(nullptr,wantedW*4,UINT(out->pixels.size()),out->pixels.data())));
+ for(size_t i=3;i<out->pixels.size();i+=4)if(out->pixels[i]<255){out->hasAlpha=true;break;}
  out->sourceW=sourceW;out->sourceH=sourceH;out->tier=TierScreenRes;
  out->codec=(frameW!=sourceW||frameH!=sourceH)?L"Windows WIC reduced frame + scaler":L"Windows WIC scaler";
  return out;
@@ -258,7 +260,7 @@ std::shared_ptr<Image> DecodeRenderReady(const std::wstring& path,unsigned maxEd
    for(unsigned y=0;y<targetH;y++)memcpy(out->pixels.data()+size_t(y)*targetW*4,
                                          config.output.u.RGBA.rgba+size_t(y)*config.output.u.RGBA.stride,
                                          size_t(targetW)*4);
-   if(config.input.has_alpha){Premultiply(*out);out->hasAlpha=true;}
+   if(config.input.has_alpha){Premultiply(*out);for(size_t i=3;i<out->pixels.size();i+=4)if(out->pixels[i]<255){out->hasAlpha=true;break;}}
    out->sourceW=config.input.width;out->sourceH=config.input.height;out->tier=TierScreenRes;
    out->codec=L"libwebp scaled decode";return out;
   }

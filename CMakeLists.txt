@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(VetroLook VERSION 2.2 LANGUAGES C CXX)
+project(VetroLook VERSION 2.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -97,7 +97,7 @@ set_target_properties(dav1d::dav1d PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT
 set(AVIF_CODEC_DAV1D SYSTEM CACHE STRING "" FORCE)
 set(AVIF_LIBYUV OFF CACHE STRING "" FORCE)
 add_subdirectory("${ROOT}/libavif" avif EXCLUDE_FROM_ALL)
-add_executable(VetroLook WIN32 src/main.cpp src/media.cpp src/modes.cpp src/shellmedia.cpp src/videomode.cpp src/mpvengine.cpp src/preview.cpp src/subtitles.cpp src/mediastate.cpp src/streaming.cpp src/resolver.cpp src/transcript.cpp src/ai.cpp src/enhance.cpp src/smtc.cpp src/capability.cpp src/pacing.cpp src/governor.cpp src/gfx.cpp src/pipeline.cpp src/theme.cpp src/meta.cpp src/metaread.cpp src/metacache.cpp src/favourites.cpp src/lensdb.cpp src/thumbs.cpp src/index.cpp src/usn.cpp src/dnd.cpp src/actions.cpp src/shellreg.cpp src/share.cpp src/decoders.cpp src/psd.cpp src/wuffs.cpp src/explorer.cpp src/integrations.cpp src/tc_ini.cpp third_party/exif.cpp resources/app.rc)
+add_executable(VetroLook WIN32 src/main.cpp src/browser.cpp src/smartgallery.cpp src/media.cpp src/modes.cpp src/shellmedia.cpp src/videomode.cpp src/mpvengine.cpp src/preview.cpp src/subtitles.cpp src/mediastate.cpp src/streaming.cpp src/resolver.cpp src/transcript.cpp src/ai.cpp src/enhance.cpp src/smtc.cpp src/capability.cpp src/pacing.cpp src/governor.cpp src/gfx.cpp src/pipeline.cpp src/theme.cpp src/meta.cpp src/metaread.cpp src/metacache.cpp src/favourites.cpp src/lensdb.cpp src/thumbs.cpp src/index.cpp src/usn.cpp src/dnd.cpp src/actions.cpp src/shellreg.cpp src/share.cpp src/decoders.cpp src/psd.cpp src/wuffs.cpp src/explorer.cpp src/integrations.cpp src/tc_ini.cpp third_party/exif.cpp resources/app.rc)
 target_include_directories(VetroLook PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mpv/include" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/include" "${ROOT}/libjpeg-turbo/src" "${CMAKE_BINARY_DIR}/jpeg" "${ROOT}/libwebp/src" "${ROOT}/tinyexr/deps/miniz" third_party)
 target_compile_definitions(VetroLook PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX LIBRAW_NODLL _CRT_SECURE_NO_WARNINGS)
 target_compile_options(VetroLook PRIVATE /W4 /utf-8 /O2 /Gy /Gw /MP)
@@ -130,6 +130,12 @@ add_custom_command(TARGET VetroLook POST_BUILD
  COMMAND ${CMAKE_COMMAND} -E copy_directory
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lensfun-db" "$<TARGET_FILE_DIR:VetroLook>/lensfun-db"
  COMMENT "Copying the Lensfun lens database")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models/gallery-tinynext.onnx")
+ add_custom_command(TARGET VetroLook POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+   "${CMAKE_CURRENT_SOURCE_DIR}/models" "$<TARGET_FILE_DIR:VetroLook>/models"
+  COMMENT "Copying the Smart Gallery model and policy")
+endif()
 
 option(VETRO_REVIEW_MODE "Isolate this build from the installed application" OFF)
 if(VETRO_REVIEW_MODE)
@@ -243,4 +249,3 @@ foreach(target VetroRawStressTests VetroFilmstripStressTests VetroBench VetroMet
 endforeach()
 target_compile_definitions(VetroFilmstripStressTests PRIVATE VETRO_THUMB_TESTS)
 target_compile_definitions(VetroRawStressTests PRIVATE VETRO_THUMB_TESTS)
-

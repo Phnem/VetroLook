@@ -136,19 +136,19 @@ std::atomic<bool> cacheReady{false};
 std::vector<std::thread> watcherThreads;
 std::atomic<int> watcherGeneration{0};
 HWND notifyWindow=nullptr;UINT notifyFolderMsg=0,notifyPhotoMsg=0;
-ULONGLONG lastNotify=0;
+ULONGLONG lastNotify=0,lastProgressNotify=0;
 std::mutex workMx;std::condition_variable workCv;
 std::deque<std::wstring> dirtyFolders;      // pending targeted re-scans
 std::set<std::wstring> dirtyPending;
 bool wantRescan=false,wantFullRebuild=false,wantDriveScan=false;
 
-void NotifyFolders(){
+void NotifyFolders(bool force=false){
  ULONGLONG now=GetTickCount64();
- if(now-lastNotify<120)return;
+ if(!force&&now-lastNotify<120)return;
  lastNotify=now;
  if(notifyWindow)PostMessageW(notifyWindow,notifyFolderMsg,0,0);
 }
-void NotifyProgress(){if(notifyWindow)PostMessageW(notifyWindow,notifyPhotoMsg,0,0);}
+void NotifyProgress(){auto now=GetTickCount64();if(now-lastProgressNotify<120)return;lastProgressNotify=now;if(notifyWindow)PostMessageW(notifyWindow,notifyPhotoMsg,0,0);}
 
 // Lists the direct children of one folder and folds the supported images
 // into a FolderEntry; returns the subdirectories to descend into next. Never
@@ -566,7 +566,7 @@ void ScannerLoop(){
   VerifyKnown(caughtUp);
  }
  SaveCache();
- scanning=false;NotifyFolders();NotifyProgress();
+ scanning=false;NotifyFolders(true);NotifyProgress();
  while(!stopping){
   std::wstring dirty;bool doRescan=false,doFull=false,doDrives=false;
   {
@@ -591,12 +591,12 @@ void ScannerLoop(){
    scanning=true;NotifyFolders();
    {std::lock_guard lock(mx);folders.clear();photosByFolder.clear();knownPhotos=0;}
    ScanNewGround();SaveCache();
-   scanning=false;NotifyFolders();NotifyProgress();
+   scanning=false;NotifyFolders(true);NotifyProgress();
   }else if(doRescan){
    scanning=true;NotifyFolders();
    VerifyKnown();
    SaveCache();
-   scanning=false;NotifyFolders();NotifyProgress();
+   scanning=false;NotifyFolders(true);NotifyProgress();
   }
   if(doDrives)SpawnWatchers();
  }

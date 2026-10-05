@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "classes": [
+    "photo",
+    "screenshot",
+    "document",
+    "icon_ui_asset",
+    "artwork",
+    "other"
+  ],
+  "hide_thresholds": [
+    1.01,
+    0.97971322289053,
+    0.5612828135490417,
+    0.9767617583274841,
+    0.9894396505265866,
+    0.7166396379470825
+  ],
+  "photo_ceiling": 0.01,
+  "minimum_margin": 0.1,
+  "calibrated": true,
+  "uncertain_is_visible": true,
+  "user_override_wins": true,
+  "model_sha256": "db197e99c866970811f7c4da597b31d32345f92ce1d45252d85f1fb3558bdfa5",
+  "validation_fingerprint": "f6150f3b22a0a35bc8d3ac7b863feff2a215f74a68348fd64ab41b85adf28af8"
+}

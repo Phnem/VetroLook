@@ -13,7 +13,7 @@ function Test-Administrator {
 }
 
 if (-not (Test-Administrator)) {
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList @(
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Elevated'
     )
     exit $LASTEXITCODE
@@ -46,9 +46,7 @@ Get-Process -Name 'VetroLook' -ErrorAction SilentlyContinue | Stop-Process -Forc
 $installPaths = @(
     'C:\Program Files\VetroLook',
     'C:\Program Files (x86)\VetroLook',
-    (Join-Path $env:LOCALAPPDATA 'Programs\VetroLook'),
-    (Join-Path $env:APPDATA 'VetroLook'),
-    (Join-Path $env:LOCALAPPDATA 'VetroLook')
+    (Join-Path $env:LOCALAPPDATA 'Programs\VetroLook')
 )
 foreach ($path in $installPaths) { Remove-ExactPath $path }
 
@@ -59,7 +57,7 @@ $registryKeys = @(
     'HKCU:\Software\Classes\Applications\VetroLook.exe',
     'HKCU:\Software\Classes\VetroLook.Media',
     'HKCU:\Software\Classes\VetroLook.Image',
-    'HKCU:\Software\VetroLook',
+    'HKCU:\Software\VetroLook\Capabilities',
     'HKLM:\Software\Classes\Applications\VetroLook.exe',
     'HKLM:\Software\Classes\VetroLook.Media',
     'HKLM:\Software\Classes\VetroLook.Image',
@@ -131,7 +129,7 @@ Add-Type -Namespace Native -Name Shell -MemberDefinition @'
 Write-Log 'Clean uninstall completed.'
 
 [System.Windows.Forms.MessageBox]::Show(
-    "The old VetroLook installation and registrations were removed.`n`nYou can now run the new Setup.exe or MSI package.",
+    "The old VetroLook installation and registrations were removed. Your language, settings, favorites and gallery corrections were kept.`n`nYou can now run the new Setup.exe or MSI package.",
     'VetroLook Clean Uninstaller',
     [System.Windows.Forms.MessageBoxButtons]::OK,
     [System.Windows.Forms.MessageBoxIcon]::Information

@@ -178,6 +178,7 @@ void  GfxClearGlassBackdrop();
 bool  GfxGlassBackdropAvailable();
 ID2D1BitmapBrush* GlassSource(const D2D1_MATRIX_3X2_F& world);
 void  Glass(const D2D1_ROUNDED_RECT& rr,const Palette& p,float opacity,const D2D1_MATRIX_3X2_F& world);
+void DrawRoundedBitmap(ID2D1Bitmap* bitmap,const D2D1_RECT_F& destination,float radius,const D2D1_RECT_F& source);
 void  SoftShadow(const D2D1_ROUNDED_RECT& rr,float opacity,float spread=1.f);
 // Marks blown highlights or crushed shadows entirely on the GPU.
 void  DrawClipping(ID2D1Bitmap* source,bool high,float opacity);
@@ -187,7 +188,7 @@ std::shared_ptr<Image> Rasterise(const Image& base,const std::function<void(ID2D
 
 // Text formats, created once.
 enum Face{F_Title,F_VideoTitle,F_Meta,F_Row,F_Label,F_Value,F_Section,F_Button,F_Big,F_Small,F_Mono,F_Timeline,
-          F_Subtitle,F_COUNT};
+          F_Subtitle,F_Display,F_Heading,F_COUNT};
 IDWriteTextFormat* Font(Face f);
 void  Write(const std::wstring& s,D2D1_RECT_F r,Face f,D2D1_COLOR_F colour);
 float Measure(const std::wstring& s,Face f,float maxWidth);

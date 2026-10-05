@@ -5,6 +5,8 @@
 #include "actions.h"
 #include "index.h"
 #include "dnd.h"
+#include "browser.h"
+#include "smartgallery.h"
 #include "favourites.h"
 #include "pipeline.h"
 #include "metacache.h"
@@ -47,6 +49,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <chrono>
+#include <optional>
 using Microsoft::WRL::ComPtr;
 namespace fs=std::filesystem;
 
@@ -57,7 +60,7 @@ constexpr UINT StreamResolved=WM_APP+41;
 constexpr UINT AiProgress=WM_APP+42;
 constexpr UINT Loaded=WM_APP+1,Preview=WM_APP+2,Tray=WM_APP+3,Saved=WM_APP+4,ActivateNormal=WM_APP+5,
  MetaReady=WM_APP+6,ThumbReady=WM_APP+7,IndexFolders=WM_APP+8,IndexProgress=WM_APP+9,
- VideoReady=WM_APP+10;
+ VideoReady=WM_APP+10,AlbumReady=WM_APP+11,BrowserReady=WM_APP+12,SmartReady=WM_APP+13;
 
 // ---------------------------------------------------------------- ids ------
 enum Id{
@@ -78,13 +81,16 @@ enum Id{
  IdFilterRawOnly,IdFilterRegularOnly,IdFilterProfileAny,IdFilterProfileSRGB,IdFilterProfileP3,
  IdFilterProfileAdobe,IdFilterProfileNone,IdFilterSizeLo,IdFilterSizeHi,IdFilterClear,IdFilterApply,
  IdFilterPopup,IdSortPopup,IdLibBrand,
- IdFavourites,IdFavouritesChip,
+ IdFavourites,IdFavouritesChip,IdLibMenu,IdNavRecent,IdNavFavourites,IdQuickScope,
  IdSyncRow,IdPowerRow,IdSeekStep,IdDiagnostics,IdAiModel,IdAiLanguage,IdSilenceSkip,IdEnhancement,
+ IdReviewUnderstood,IdReviewApply,IdReviewLater,IdReviewToast,
+ IdSmartToggle,IdSmartUncertain,IdSmartClass0,IdSmartClass1,IdSmartClass2,IdSmartClass3,IdSmartClass4,IdSmartClass5,
+ IdNavFolder0=1<<17,
  IdGallery0=4096,
  IdFilterExt0=1<<19,       // +one per supported extension
  IdCard0=1<<21             // +one per visible library/album grid cell
 };
-enum Panel{PanelNone,PanelInfo,PanelMenu,PanelEdit};
+enum Panel{PanelNone,PanelInfo,PanelMenu,PanelEdit,PanelLibrary};
 enum Tool{ToolNone,ToolCrop,ToolRotate,ToolDraw,ToolArrow,ToolSelect};
 enum Screen{ScrLibrary,ScrAlbum,ScrViewer};
 // The library opens on the timeline. Every modern gallery — Photos, Google
@@ -97,6 +103,7 @@ constexpr int DefaultLibView=ViewPhotosFlat;
 HWND win=nullptr,explorer=nullptr;HHOOK hook=nullptr;
 ComPtr<ID2D1Bitmap> bitmap,backdrop;
 std::map<std::wstring,ComPtr<ID2D1Bitmap>> thumbBitmaps;
+std::map<std::wstring,ULONGLONG> thumbBitmapUsed;
 std::shared_ptr<Image> current;
 std::wstring currentPath,errorText;
 // Which cached frame the renderer is currently showing, in the cache's own
@@ -182,6 +189,16 @@ std::vector<FolderEntry> libFolders;
 std::vector<PhotoEntry> albumPhotos;
 std::unordered_map<uint64_t,std::vector<PhotoEntry>> assetVariants;
 std::wstring albumFolder;
+std::wstring browserPath,browserError,springFolder;
+std::vector<BrowserFolder> browserChildren;
+bool browserLoading=false,libraryPanelClosing=false,fileDropActive=false,springOpened=false;
+uint64_t browserGeneration=0;ULONGLONG springBegan=0;POINT dropPoint{};
+int searchScope=0;
+struct BrowserRow{int id;D2D1_RECT_F rect;std::wstring text;const wchar_t* glyph;std::wstring path;bool active;};
+std::vector<BrowserRow> browserRows;
+void PaintBrowserPanel(D2D1_RECT_F body,const Palette& p,float alpha);
+void LayoutBrowserPanel(float w,float h);
+
 std::wstring libSearch;bool libSearchFocused=false;double libSearchCaretOn=0;
 int libSortField=1;bool libSortDesc=true;               // 0 name, 1 date, 2 size
 bool filterOpen=false,sortOpen=false;
@@ -199,6 +216,7 @@ float libScroll=0,libScrollVel=0,libScrollExtent=0;
 float albumScroll=0,albumScrollVel=0,albumScrollExtent=0;
 float filterScroll=0,filterScrollVel=0,filterScrollExtent=0;
 float scanSpin=0;
+bool libraryRefreshScheduled=false;
 std::unordered_map<std::wstring,std::wstring> profileCache; // lower path -> profile, filled lazily
 std::mutex profileMx;
 struct TimelineGroup{uint32_t day=0;std::vector<size_t> photos;};
@@ -452,10 +470,12 @@ float Height(const D2D1_RECT_F& r){return r.bottom-r.top;}
 D2D1_RECT_F Grow(D2D1_RECT_F r,float dx,float dy){return D2D1::RectF(r.left-dx,r.top-dy,r.right+dx,r.bottom+dy);}
 void Hotspot(int id,D2D1_RECT_F r){hots.push_back({id,r});rects[id]=r;}
 D2D1_RECT_F R(int id){auto f=rects.find(id);return f==rects.end()?D2D1::RectF(0,0,0,0):f->second;}
+bool GalleryReviewModal();
 int HitTest(float x,float y){
  if(chrome.v<.1f)return IdNone;
  auto body=R(IdPanelBody);
  for(auto it=hots.rbegin();it!=hots.rend();++it)if(Inside(it->r,x,y)){
+  if(GalleryReviewModal()&&it->id!=IdReviewUnderstood&&it->id!=IdReviewApply&&it->id!=IdReviewLater&&it->id!=IdWinClose&&it->id!=IdWinMin)return IdNone;
   // Panel controls must never hit through their clipped scroll viewport.
   bool panelControl=it->id>=IdSend&&it->id<=IdSwatch5;
   panelControl|=it->id==IdShapeRect||it->id==IdShapeEllipse||it->id==IdCopyPath||it->id==IdOpenMap;
@@ -869,7 +889,7 @@ void GpuPreUpload(const std::shared_ptr<Image>& image,const std::wstring& key,co
  if(gpuUploads.load()+gpuReuses.load()!=before)gpuPreUploads++;
 }
 
-void ReleaseBitmaps(){VideoModeReleaseTextures();bitmap.Reset();backdrop.Reset();GpuRelease();thumbBitmaps.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();scopeBitmap.Reset();}
+void ReleaseBitmaps(){VideoModeReleaseTextures();bitmap.Reset();backdrop.Reset();GpuRelease();thumbBitmaps.clear();thumbBitmapUsed.clear();folderPreviews.clear();folderTx.photos.clear();hero.fromBitmap.Reset();for(auto& g:histPath)g.Reset();scopeBitmap.Reset();}
 
 // ------------------------------------------------------------ worker -------
 // Prefetch order, rebuilt from how the reader is actually moving. A fixed
@@ -1066,9 +1086,10 @@ void SetLanguage(int value){
  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Language",REG_DWORD,&stored,sizeof(stored));
  Wake();
 }
-void ClosePanel(){panel=PanelNone;pendingPanel=PanelNone;panelSlide.To(0);confirmDelete=false;Wake();}
+void ClosePanel(){libraryPanelClosing=panel==PanelLibrary;panel=PanelNone;pendingPanel=PanelNone;panelSlide.To(0);confirmDelete=false;Wake();}
 void RequestFullResolution();
 void OpenPanel(int which){
+ if(which==PanelLibrary)libraryPanelClosing=true;else libraryPanelClosing=false;
  // The histogram and the clipping overlays are read from pixels, so the panel
  // is the one reader of the full tier that is not a zoom.
  if(which==PanelInfo)RequestFullResolution();
@@ -1645,7 +1666,7 @@ constexpr float Margin=14,Bubble=44,Cell=40,SideWidth=350,GalleryH=92,ThumbH=72;
 constexpr float RowH=54,RowGap=8,RowRadius=17,PanelHead=82,GroupGap=14;
 constexpr float ThumbNarrow=34,ThumbWide=118,ThumbGap=6;
 float SideTop(){return Margin+Bubble+14;}
-float SideBottom(float h){return h-Margin-(siblings.size()>1?GalleryH+12:12);}
+float SideBottom(float h){return h-Margin-(siblings.size()>1?GalleryH+12:0)-(mediaMode.Caps().canZoom?Bubble+12:12);}
 // Shared by the viewer's top bar and the library/album chrome, so the window
 // controls sit in the same place and answer to the same hit tests everywhere.
 D2D1_RECT_F LayoutWindowButtons(float w){
@@ -1660,7 +1681,14 @@ D2D1_RECT_F LayoutWindowButtons(float w){
 // The startup screen: every folder the index knows holds at least one photo,
 // browsable, searchable and filterable, opening into a per-folder grid and
 // from there into the same single-image viewer the app always had.
-constexpr float LibTop=88,LibCard=184,LibCardH=182,LibGap=22,AlbumCell=168;
+constexpr float LibTop=176,LibCard=220,LibCardH=218,LibGap=20,AlbumCell=168;
+// Painting continues under the floating glass. Only input is clipped, so a
+// thumbnail behind the header can supply the backdrop without stealing clicks.
+void LibraryHotspot(int id,D2D1_RECT_F cell,float bottom){
+ rects[id]=cell;
+ auto hit=D2D1::RectF(cell.left,(std::max)(LibTop,cell.top),cell.right,(std::min)(bottom,cell.bottom));
+ if(Height(hit)>0)hots.push_back({id,hit});
+}
 std::wstring RuPlural(uint64_t n,Str one,Str few,Str many){
  uint64_t m10=n%10,m100=n%100;
  if(m10==1&&m100!=11)return T(one);
@@ -1728,6 +1756,8 @@ void ClassifyProfile(const std::wstring& path){
 
 std::vector<FolderEntry> RefreshLibraryFolders(){
  auto all=IndexSnapshotFolders();
+ static std::unordered_map<std::wstring,uint64_t> familyIds;
+ auto familyId=[&](const std::wstring& path){auto found=familyIds.find(path);if(found!=familyIds.end())return found->second;auto id=PhysicalId(path);familyIds[path]=id;return id;};
  // Only generic siblings are automatic candidates. Named collections such as
  // Wedding/Japan/Cats stay independent even when their parent is shared.
  static const std::unordered_set<std::wstring> generic={L"images",L"img",L"assets",L"media",L"renders",L"render",L"exports",L"export",L"output",L"raw",L"edited",L"final",L"screenshots",L"previews"};
@@ -1739,11 +1769,11 @@ std::vector<FolderEntry> RefreshLibraryFolders(){
  }
  std::unordered_set<size_t> grouped;std::vector<FolderEntry> families;
  for(auto& [parent,indices]:candidates)if(indices.size()>1){
-  DWORD split=0,bytes=sizeof(split);std::wstring value=std::to_wstring(PhysicalId(parent));
+  DWORD split=0,bytes=sizeof(split);std::wstring value=std::to_wstring(familyId(parent));
   RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\LibrarySeparate",value.c_str(),RRF_RT_REG_DWORD,nullptr,&split,&bytes);
   if(split)continue;
   for(size_t i=0;i<all.size();++i)if(NormalisePath(all[i].path)==parent)indices.push_back(i);
-  FolderEntry family;family.path=parent;family.name=fs::path(parent).filename().wstring();family.id=PhysicalId(parent);
+  FolderEntry family;family.path=parent;family.name=fs::path(parent).filename().wstring();family.id=familyId(parent);
   for(auto i:indices){auto& f=all[i];family.members.push_back(f.path);family.photoCount+=f.photoCount;family.totalBytes+=f.totalBytes;family.modified=(std::max)(family.modified,f.modified);
    if(f.sampleCount&&family.sampleCount<4)family.samples[family.sampleCount++]=f.samples[0];grouped.insert(i);}
   families.push_back(std::move(family));
@@ -1812,15 +1842,14 @@ bool PhotoPasses(const PhotoEntry& photo){
  }
  return true;
 }
-void SortPhotos(std::vector<PhotoEntry>& list){
+void SortPhotos(std::vector<PhotoEntry>& list,int field=libSortField,bool descending=libSortDesc){
  auto byName=[](const PhotoEntry& a,const PhotoEntry& b){return StrCmpLogicalW(a.name.c_str(),b.name.c_str())<0;};
  auto byDate=[](const PhotoEntry& a,const PhotoEntry& b){return a.modified<b.modified;};
  auto bySize=[](const PhotoEntry& a,const PhotoEntry& b){return a.size<b.size;};
- if(libSortField==0)std::sort(list.begin(),list.end(),byName);
- else if(libSortField==1)std::sort(list.begin(),list.end(),byDate);
+ if(field==0)std::sort(list.begin(),list.end(),byName);
+ else if(field==1)std::sort(list.begin(),list.end(),byDate);
  else std::sort(list.begin(),list.end(),bySize);
- if(libSortDesc&&libSortField!=0)std::reverse(list.begin(),list.end());
- if(libSortDesc&&libSortField==0)std::reverse(list.begin(),list.end());
+ if(descending)std::reverse(list.begin(),list.end());
 }
 std::wstring AssetStem(const PhotoEntry& photo,bool& edited){
  auto stem=fs::path(photo.name).stem().wstring();for(auto& c:stem)c=towlower(c);edited=false;
@@ -1832,34 +1861,37 @@ std::wstring AssetStem(const PhotoEntry& photo,bool& edited){
  }
  return stem;
 }
-void BuildAssetStacks(){
- assetVariants.clear();
+void BuildAssetStacks(std::vector<PhotoEntry>& photos,std::unordered_map<uint64_t,std::vector<PhotoEntry>>& variants,int field,bool descending){
+ variants.clear();
  struct Candidate{std::vector<PhotoEntry> files;bool raw=false,regular=false,edited=false,plain=false;};
  std::unordered_map<std::wstring,Candidate> groups;
- for(auto& photo:albumPhotos){bool edit=false;auto stem=AssetStem(photo,edit);auto parent=NormalisePath(fs::path(photo.path).parent_path().wstring());auto& group=groups[parent+L"\n"+stem];
+ for(auto& photo:photos){bool edit=false;auto stem=AssetStem(photo,edit);auto parent=NormalisePath(fs::path(photo.path).parent_path().wstring());auto& group=groups[parent+L"\n"+stem];
   group.raw|=RawExt(photo.ext);group.regular|=!RawExt(photo.ext);group.edited|=edit;group.plain|=!edit;group.files.push_back(photo);}
- std::vector<PhotoEntry> collapsed;collapsed.reserve(albumPhotos.size());
+ std::vector<PhotoEntry> collapsed;collapsed.reserve(photos.size());
  for(auto& [key,group]:groups){
   bool stack=group.files.size()>1&&((group.raw&&group.regular)||(group.edited&&group.plain));
   if(!stack){for(auto& file:group.files)collapsed.push_back(std::move(file));continue;}
   auto score=[](const PhotoEntry& file){bool edit=false;AssetStem(file,edit);return edit&&!RawExt(file.ext)?4:!RawExt(file.ext)?3:edit?2:1;};
   auto primary=std::max_element(group.files.begin(),group.files.end(),[&](auto& a,auto& b){return score(a)<score(b);});
-  primary->variantCount=uint32_t(group.files.size());assetVariants[primary->id]=group.files;collapsed.push_back(*primary);
+  primary->variantCount=uint32_t(group.files.size());variants[primary->id]=group.files;collapsed.push_back(*primary);
  }
- albumPhotos=std::move(collapsed);SortPhotos(albumPhotos);
+ photos=std::move(collapsed);SortPhotos(photos,field,descending);
 }
+void BuildAssetStacks(){BuildAssetStacks(albumPhotos,assetVariants,libSortField,libSortDesc);}
 uint32_t LocalDay(uint64_t fileTime){
  if(!fileTime)return 0;
  FILETIME utc{DWORD(fileTime),DWORD(fileTime>>32)},local{};SYSTEMTIME date{};
  if(!FileTimeToLocalFileTime(&utc,&local)||!FileTimeToSystemTime(&local,&date))return 0;
  return uint32_t(date.wYear)*10000u+uint32_t(date.wMonth)*100u+uint32_t(date.wDay);
 }
-void RebuildTimeline(){
+std::vector<TimelineGroup> MakeTimeline(const std::vector<PhotoEntry>& photos){
  std::map<uint32_t,std::vector<size_t>,std::greater<uint32_t>> days;
- for(size_t i=0;i<albumPhotos.size();++i)days[LocalDay(albumPhotos[i].modified)].push_back(i);
- timelineGroups.clear();timelineGroups.reserve(days.size());
- for(auto& [day,photos]:days)timelineGroups.push_back({day,std::move(photos)});
+ for(size_t i=0;i<photos.size();++i)days[LocalDay(photos[i].modified)].push_back(i);
+ std::vector<TimelineGroup> groups;groups.reserve(days.size());
+ for(auto& [day,items]:days)groups.push_back({day,std::move(items)});
+ return groups;
 }
+void RebuildTimeline(){timelineGroups=MakeTimeline(albumPhotos);}
 std::wstring TimelineDateLabel(uint32_t key){
  if(!key)return language?L"Unknown date":L"Без даты";
  SYSTEMTIME now{};GetLocalTime(&now);
@@ -1875,46 +1907,150 @@ std::wstring TimelineDateLabel(uint32_t key){
  GetDateFormatEx(language?L"en-US":L"ru-RU",0,&date,language?L"MMMM d, yyyy":L"d MMMM yyyy",result,96,nullptr);
  return result;
 }
-void RefreshAlbum(){
- albumPhotos.clear();
- if(favouritesOpen){
-  RefreshFavourites();
-  for(auto& photo:favouritePhotos)if(PhotoPasses(photo))albumPhotos.push_back(photo);
-  SortPhotos(albumPhotos);RebuildTimeline();
-  return;
- }
- auto collect=[&](const FolderEntry& f){
-  auto addPhotos=[&](const std::wstring& p){
-   auto list=IndexPhotosIn(p);
-   if(list.empty()){
-    FolderEntry probe;
-    list=IndexInspectDirectory(p,probe);
+// A single latest-request worker builds album/timeline data. The UI never
+// lists directories, sorts the whole collection or waits for a superseded job.
+SmartSettings smartSettings;
+Spring reviewMorph(0,PanelK,PanelC),reviewReveal(0,PanelK,PanelC),reviewProgress(0,PanelK,PanelC),reviewFade(0,PanelK,PanelC);
+bool reviewCollapsed=false,reviewDeferred=false,reviewFinishedNotified=false,reviewApplying=false,reviewCommitted=false,reviewAlbumReady=false;
+double reviewApplyStarted=0;uint64_t reviewApplyGeneration=0;
+std::optional<SmartStatus> reviewPreview;
+std::mutex reviewInventoryMx;std::condition_variable reviewInventoryCv;std::thread reviewInventoryWorker;
+bool reviewInventoryRequested=false,reviewInventoryStopping=false;
+SmartStatus GalleryReviewStatus(){return reviewPreview?*reviewPreview:SmartStatusNow();}
+SmartSettings GalleryAppliedSettings(){auto settings=smartSettings;settings.applyAutomatic=GalleryReviewStatus().autoApply;return settings;}
+void RequestSmartInventory(){
+ if(testing||preview)return;
+ {std::lock_guard lock(reviewInventoryMx);if(reviewInventoryStopping)return;reviewInventoryRequested=true;
+  if(!reviewInventoryWorker.joinable())reviewInventoryWorker=std::thread([]{
+   for(;;){
+    {std::unique_lock lock(reviewInventoryMx);reviewInventoryCv.wait(lock,[]{return reviewInventoryStopping||reviewInventoryRequested;});if(reviewInventoryStopping)break;reviewInventoryRequested=false;}
+    bool scanning=IndexIsScanning();std::vector<PhotoEntry> photos;
+    for(auto& folder:IndexSnapshotFolders()){auto entries=IndexPhotosIn(folder.path);photos.insert(photos.end(),std::make_move_iterator(entries.begin()),std::make_move_iterator(entries.end()));}
+    SmartSyncLibrary(photos,!scanning&&!IndexIsScanning());
    }
-   for(auto& photo:list)if(PhotoPasses(photo))albumPhotos.push_back(photo);
-  };
-  if(f.members.empty())addPhotos(f.path);
-  else for(auto& member:f.members)addPhotos(member);
- };
- if(libView==ViewPhotosFlat){
-  for(auto& f:libFolders)collect(f);
- }else{
-  auto family=std::find_if(libFolders.begin(),libFolders.end(),[](auto& f){return NormalisePath(f.path)==NormalisePath(albumFolder);});
-  if(family!=libFolders.end())collect(*family);
-  else for(auto& photo:IndexPhotosIn(albumFolder))if(PhotoPasses(photo))albumPhotos.push_back(photo);
-  // The card carries a photo count from the summary scan, but the per-folder
-  // photo list arrives later on the indexer's own thread. Opening a folder
-  // before that lands would otherwise show an empty grid for a moment and,
-  // worse, give the opening animation no destination cells to fly into — the
-  // reason the first open of a folder had no animation and the second did.
-  // One directory listing costs milliseconds and makes both opens identical.
-  if(albumPhotos.empty()&&!albumFolder.empty()){
-   FolderEntry probe;
-   for(auto& photo:IndexInspectDirectory(albumFolder,probe))if(PhotoPasses(photo))albumPhotos.push_back(photo);
-  }
+  });
+ }reviewInventoryCv.notify_one();
+}
+void StopSmartInventory(){
+ {std::lock_guard lock(reviewInventoryMx);reviewInventoryStopping=true;}
+ reviewInventoryCv.notify_all();if(reviewInventoryWorker.joinable())reviewInventoryWorker.join();
+}
+
+bool smartRefreshScheduled=false;
+struct AlbumRequest{
+ uint64_t generation=0;bool flat=false;
+ std::wstring folder,needle;
+ std::vector<std::wstring> paths;
+ std::unordered_map<std::wstring,bool> extensions;
+ bool rawOnly=false,regularOnly=false;int profile=0,sort=1;bool descending=true,recursive=false;
+ uint64_t sizeLo=0,sizeHi=~0ull;SmartSettings smart;
+};
+struct AlbumResult{
+ uint64_t generation=0;bool flat=false;std::wstring folder;
+ std::vector<PhotoEntry> photos;
+ std::unordered_map<uint64_t,std::vector<PhotoEntry>> variants;
+ std::vector<TimelineGroup> groups;
+ double buildMs=0;
+};
+std::mutex albumMx;std::condition_variable albumCv;std::thread albumWorker;
+std::optional<AlbumRequest> albumJob;
+std::optional<AlbumResult> albumResult;
+std::atomic<uint64_t> albumGeneration{0};bool albumStopping=false;
+bool AlbumPhotoPasses(const PhotoEntry& photo,const AlbumRequest& request){
+ if(!SmartPasses(photo,request.smart))return false;
+ if(!request.needle.empty()){
+  auto name=photo.name;for(auto& c:name)c=towlower(c);
+  if(name.find(request.needle)==std::wstring::npos)return false;
  }
- SortPhotos(albumPhotos);
- BuildAssetStacks();
- RebuildTimeline();
+ if(photo.size<request.sizeLo||photo.size>request.sizeHi)return false;
+ auto ext=photo.ext;for(auto& c:ext)c=towlower(c);
+ if(!request.extensions.empty()&&!request.extensions.count(ext))return false;
+ bool raw=RawExt(ext);
+ if((request.rawOnly&&!raw)||(request.regularOnly&&raw))return false;
+ if(request.profile){
+  auto profile=ProfileOf(photo.path);
+  if(!profile.empty()&&!((request.profile==1&&profile==L"sRGB")||
+    (request.profile==4&&profile==L"none")||((request.profile==2||request.profile==3)&&profile==L"other")))return false;
+ }
+ return true;
+}
+void BuildAlbumWorker(){
+ CoInitializeEx(nullptr,COINIT_MULTITHREADED);
+ for(;;){
+  AlbumRequest job;
+  {
+   std::unique_lock lock(albumMx);albumCv.wait(lock,[]{return albumStopping||albumJob.has_value();});
+   if(albumStopping)break;job=std::move(*albumJob);albumJob.reset();
+  }
+  auto began=std::chrono::steady_clock::now();
+  AlbumResult result;result.generation=job.generation;result.flat=job.flat;result.folder=job.folder;
+  if(job.recursive){
+   job.paths={job.folder};std::error_code ec;
+   for(fs::recursive_directory_iterator it(job.folder,fs::directory_options::skip_permission_denied,ec),end;it!=end&&!ec&&albumGeneration==job.generation;it.increment(ec)){
+    if(it->is_directory(ec)){
+     auto path=it->path().wstring();DWORD attrs=GetFileAttributesW(path.c_str());
+     if(attrs!=INVALID_FILE_ATTRIBUTES&&(attrs&FILE_ATTRIBUTE_REPARSE_POINT)){it.disable_recursion_pending();continue;}
+     job.paths.push_back(std::move(path));
+    }
+   }
+  }
+  for(auto& path:job.paths){
+   if(albumGeneration!=job.generation)break;
+   FolderEntry direct;auto photos=job.recursive?IndexInspectDirectory(path,direct):IndexPhotosIn(path);
+   SmartRequest(photos);
+   for(auto& photo:photos)if(AlbumPhotoPasses(photo,job))result.photos.push_back(std::move(photo));
+  }
+  if(albumGeneration!=job.generation)continue;
+  BuildAssetStacks(result.photos,result.variants,job.sort,job.descending);
+  if(albumGeneration!=job.generation)continue;
+  result.groups=MakeTimeline(result.photos);
+  result.buildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count();
+  {
+   std::lock_guard lock(albumMx);
+   if(albumStopping)break;
+   if(albumGeneration!=job.generation)continue;
+   albumResult=std::move(result);
+  }
+  PostMessageW(win,AlbumReady,0,0);
+ }
+ CoUninitialize();
+}
+void StopAlbumWorker(){
+ {std::lock_guard lock(albumMx);albumStopping=true;++albumGeneration;albumJob.reset();}
+ albumCv.notify_one();if(albumWorker.joinable())albumWorker.join();
+}
+void RefreshAlbum(){
+ if(favouritesOpen){
+  ++albumGeneration;albumPhotos.clear();RefreshFavourites();
+  for(auto& photo:favouritePhotos)if(PhotoPasses(photo)&&SmartPasses(photo,GalleryAppliedSettings()))albumPhotos.push_back(photo);
+  SortPhotos(albumPhotos);RebuildTimeline();return;
+ }
+ AlbumRequest request;request.generation=++albumGeneration;
+ request.flat=screen==ScrLibrary&&libView==ViewPhotosFlat;request.folder=albumFolder;request.needle=libSearch;
+ for(auto& c:request.needle)c=towlower(c);
+ request.extensions=filterExtOn;request.rawOnly=filterRawOnly;request.regularOnly=filterRegularOnly;
+ request.profile=filterProfile;request.sort=libSortField;request.descending=libSortDesc;
+ request.sizeLo=filterSizeLo;request.sizeHi=filterSizeHi;request.smart=GalleryAppliedSettings();
+ request.recursive=!request.flat&&!request.needle.empty()&&searchScope==1;
+ auto addFolder=[&](const FolderEntry& folder){
+  if(folder.members.empty())request.paths.push_back(folder.path);
+  else for(auto& member:folder.members)request.paths.push_back(member);
+ };
+ if(request.flat||(!request.needle.empty()&&searchScope==2)){
+  for(auto& folder:IndexSnapshotFolders())request.paths.push_back(folder.path);
+ }else{
+  request.paths.push_back(albumFolder);
+  if(!request.needle.empty()&&searchScope==1)for(auto& folder:IndexSnapshotFolders())
+   if(BrowserWithin(folder.path,albumFolder)&&NormalisePath(folder.path)!=NormalisePath(albumFolder))request.paths.push_back(folder.path);
+ }
+ static std::wstring previousTarget;
+ auto target=request.flat?L"|timeline":NormalisePath(request.folder);
+ if(target!=previousTarget){albumPhotos.clear();assetVariants.clear();timelineGroups.clear();previousTarget=target;}
+ {
+  std::lock_guard lock(albumMx);albumJob=std::move(request);
+  if(!albumWorker.joinable())albumWorker=std::thread(BuildAlbumWorker);
+ }
+ albumCv.notify_one();Wake();
 }
 // The Favourites collection. Nothing is copied and nothing is moved: this
 // reads the local database and turns each surviving path into the same
@@ -1939,11 +2075,12 @@ void RefreshFavourites(){
  favouritesSeen=FavouritesRevision();
 }
 void RefreshLibrary(){
+ RequestSmartInventory();
  libFolders=RefreshLibraryFolders();
- RefreshFavourites();
+ if(favouritesSeen!=FavouritesRevision())RefreshFavourites();
  if(favouritesOpen){
   albumPhotos.clear();
-  for(auto& photo:favouritePhotos)if(PhotoPasses(photo))albumPhotos.push_back(photo);
+  for(auto& photo:favouritePhotos)if(PhotoPasses(photo)&&SmartPasses(photo,GalleryAppliedSettings()))albumPhotos.push_back(photo);
   SortPhotos(albumPhotos);RebuildTimeline();
  }else if(libView==ViewPhotosFlat||screen==ScrAlbum)RefreshAlbum();
  Wake();
@@ -1969,6 +2106,13 @@ constexpr float TimelineHeaderH=38,TimelineGroupGap=24;
 // Height reserved above the timeline for the Favourites shortcut chip.
 constexpr float FavouriteChipH=54;
 struct TimelinePlacement{int columns=1;float contentH=0;std::vector<float> groupTops;};
+std::pair<size_t,size_t> VisibleTimelineRange(float groupTop,size_t count,int columns,float bottom){
+ float firstRow=(0.f-groupTop-TimelineHeaderH)/(AlbumCell+LibGap);
+ float lastRow=(bottom-groupTop-TimelineHeaderH)/(AlbumCell+LibGap);
+ size_t first=size_t((std::max)(0.f,floorf(firstRow)))*size_t(columns);
+ size_t last=size_t((std::max)(0.f,ceilf(lastRow)+1.f))*size_t(columns);
+ return {(std::min)(count,first),(std::min)(count,last)};
+}
 TimelinePlacement PlanTimeline(float areaW){
  TimelinePlacement plan;
  plan.columns=(std::max)(1,int((areaW+LibGap)/(AlbumCell+LibGap)));
@@ -1988,7 +2132,7 @@ D2D1_RECT_F TimelinePhotoRect(uint64_t photoId,float areaLeft,float areaTop,floa
   for(size_t local=0;local<photos.size();++local)if(albumPhotos[photos[local]].id==photoId){
    int col=int(local)%plan.columns,row=int(local)/plan.columns;
    float x=areaLeft+col*(AlbumCell+LibGap);
-   float y=areaTop-scroll+FavouriteChipH+plan.groupTops[g]+TimelineHeaderH+row*(AlbumCell+LibGap);
+   float y=areaTop-scroll+plan.groupTops[g]+TimelineHeaderH+row*(AlbumCell+LibGap);
    return D2D1::RectF(x,y,x+AlbumCell,y+AlbumCell);
   }
  }
@@ -2142,21 +2286,22 @@ void Layout(){
  // meaning for a film is absent, not dimmed and not inert: the shell asks for a
  // capability, it does not ask which engine is behind the surface.
  auto caps=mediaMode.Caps();
+ float controlY=caps.canZoom?h-Margin-Bubble-(siblings.size()>1?GalleryH+12:0):y0;
  bool wideEnough=w>940&&caps.canZoom;
  if(wideEnough){
-  float left=Margin+Bubble+10,width=236;
-  D2D1_RECT_F zoomBar=D2D1::RectF(left,y0,left+width,y1);
+  float left=Margin,width=236;
+  D2D1_RECT_F zoomBar=D2D1::RectF(left,controlY,left+width,controlY+Bubble);
   rects[IdZoomBar]=zoomBar;                       // the bubble itself
-  Hotspot(IdZoomOut,D2D1::RectF(left+7,y0+5,left+41,y1-5));
-  Hotspot(IdTrack,D2D1::RectF(left+48,y0+8,left+width-48,y1-8));
-  Hotspot(IdZoomIn,D2D1::RectF(left+width-41,y0+5,left+width-7,y1-5));
+  Hotspot(IdZoomOut,D2D1::RectF(left+7,controlY+5,left+41,controlY+Bubble-5));
+  Hotspot(IdTrack,D2D1::RectF(left+48,controlY+8,left+width-48,controlY+Bubble-8));
+  Hotspot(IdZoomIn,D2D1::RectF(left+width-41,controlY+5,left+width-7,controlY+Bubble-5));
  }
 
  D2D1_RECT_F winBar=LayoutWindowButtons(w);
  float dockRight=winBar.left-10;
  if(caps.canEdit){
-  float editRight=winBar.left-10;
-  D2D1_RECT_F editBubble=D2D1::RectF(editRight-74,y0,editRight,y1);
+  float editRight=w-Margin;
+  D2D1_RECT_F editBubble=D2D1::RectF(editRight-100,controlY,editRight,controlY+Bubble);
   Hotspot(IdEdit,editBubble);
   dockRight=editBubble.left-8;
  }
@@ -2168,6 +2313,7 @@ void Layout(){
  if(caps.canZoom)dockOrder.push_back(IdFit);
  dockOrder.push_back(IdMore);
  float dockWidth=dockOrder.size()*Cell+12;
+ if(caps.canZoom){dockRight=(w+dockWidth)/2;y0=controlY;y1=controlY+Bubble;}
  D2D1_RECT_F dock=D2D1::RectF(dockRight-dockWidth,y0,dockRight,y1);
  rects[IdDockBar]=dock;
  for(size_t i=0;i<dockOrder.size();i++)
@@ -2196,7 +2342,7 @@ void Layout(){
  }
 
  // Side panel
- if(panel!=PanelNone||panelSlide.v>.004f){
+ if((panel!=PanelNone||panelSlide.v>.004f)&&panel!=PanelLibrary&&!libraryPanelClosing){
   float top=SideTop(),bottom=SideBottom(h);
   D2D1_RECT_F body=D2D1::RectF(w-16-SideWidth,top,w-16,(std::max)(top+120,bottom));
   body=Shift(body,(1.f-panelSlide.v)*24.f,0);
@@ -2354,7 +2500,7 @@ void PaintBackdrop(float w,float h,const Palette& p){
   Ink()->SetColor(Mix(D2D1::ColorF(.02f,.03f,.05f,.26f),D2D1::ColorF(.97f,.975f,.99f,.36f),themeMix.v));
   target->FillRectangle(D2D1::RectF(0,0,w,h),Ink());
  }else{
-  Ink()->SetColor(Mix(D2D1::ColorF(.055f,.061f,.074f,1.f),D2D1::ColorF(.95f,.955f,.965f,1.f),themeMix.v));
+  Ink()->SetColor(Mix(D2D1::ColorF(.070f,.061f,.050f,1.f),D2D1::ColorF(.965f,.916f,.805f,1.f),themeMix.v));
   target->FillRectangle(D2D1::RectF(0,0,w,h),Ink());
  }
  (void)p;
@@ -3152,6 +3298,7 @@ void PaintPanel(const Palette& p){
  if(panel==PanelInfo)PaintInfoPanel(body,p,alpha);
  else if(panel==PanelMenu)PaintMenuPanel(body,p,alpha);
  else if(panel==PanelEdit)PaintEditPanel(body,p,alpha);
+ else if(panel==PanelLibrary||(panel==PanelNone&&libraryPanelClosing))PaintBrowserPanel(body,p,alpha);
  Dc()->SetTransform(previous);
 }
 void PaintGallery(const Palette& p){
@@ -3256,6 +3403,114 @@ void PaintToast(float w,float h,const Palette& p){
  Glass(D2D1::RoundedRect(pill,18,18),p,alpha,D2D1::Matrix3x2F::Identity());
  Write(toast,pill,F_Button,Fade(p.text,alpha));
 }
+void CloseLibraryPopups();
+bool GalleryReviewVisible(){auto status=GalleryReviewStatus();return status.inventoryKnown&&status.reviewTotal&&!status.autoApply&&!reviewDeferred&&!reviewApplying;}
+bool GalleryReviewModal(){return screen!=ScrViewer&&GalleryReviewVisible()&&!reviewCollapsed;}
+void GalleryReviewCommand(int id){
+ if(id==IdReviewUnderstood){reviewCollapsed=true;reviewMorph.To(1);}
+ if(id==IdReviewToast){reviewCollapsed=false;reviewMorph.To(0);}
+ if(id==IdReviewLater){reviewDeferred=true;reviewReveal.To(0);}
+ if(id==IdReviewApply&&GalleryReviewStatus().reviewReady){
+  reviewApplying=true;reviewCommitted=false;reviewAlbumReady=false;reviewApplyStarted=Now();reviewFade.To(1);reviewReveal.To(0);
+ }
+ if(reviewPreview){
+  const wchar_t* phase=id==IdReviewUnderstood?L"TOAST":id==IdReviewLater?L"LATER":id==IdReviewApply?L"APPLYING":L"PROCESSING";
+  SetWindowTextW(win,(std::wstring(L"VetroLook Gallery Review Preview · ")+phase).c_str());
+ }
+ Wake();
+}
+bool TickGalleryReview(float dt){
+ auto status=GalleryReviewStatus();
+ static bool wasScanning=true;
+ bool scanning=IndexIsScanning();if(!testing&&wasScanning&&!scanning)RequestSmartInventory();wasScanning=scanning;
+ bool visible=GalleryReviewVisible()&&screen!=ScrViewer;
+ reviewReveal.To(visible?1.f:0.f);
+ if(visible){
+  float fraction=status.reviewTotal?float(double(status.reviewCompleted)/status.reviewTotal):0;
+  reviewProgress.To(status.discoveryComplete?fraction:(std::min)(fraction,.99f));
+  if(status.reviewReady&&!reviewFinishedNotified){reviewFinishedNotified=true;reviewCollapsed=false;reviewMorph.To(0);CloseLibraryPopups();if(reviewPreview)SetWindowTextW(win,L"VetroLook Gallery Review Preview · READY");}
+ }
+ if(reviewApplying){
+  if(!reviewCommitted&&reviewFade.v>=.98f){
+   bool applied=reviewPreview?true:SmartApplyReviewed();
+   if(applied){
+    if(reviewPreview)reviewPreview->autoApply=true;
+    reviewCommitted=true;if(!reviewPreview)RefreshLibrary();reviewApplyGeneration=albumGeneration;
+    reviewAlbumReady=(screen==ScrLibrary&&libView==ViewFolders)||favouritesOpen||reviewPreview.has_value();
+   }else{reviewApplying=false;reviewFade.To(0);Notify(language?L"Could not apply the results. Try again.":L"Не удалось применить результат. Попробуйте ещё раз.");}
+  }
+  if(reviewCommitted&&reviewAlbumReady&&Now()-reviewApplyStarted>=.7)reviewFade.To(0);
+  if(reviewCommitted&&reviewFade.target==0&&!reviewFade.Moving()){reviewApplying=false;if(reviewPreview)SetWindowTextW(win,L"VetroLook Gallery Review Preview · APPLIED");}
+ }
+ bool busy=reviewMorph.Step(dt);busy|=reviewReveal.Step(dt);busy|=reviewProgress.Step(dt);busy|=reviewFade.Step(dt);
+ return busy||reviewApplying;
+}
+std::wstring GalleryReviewRemaining(const SmartStatus& status){
+ if(!status.modelReady)return language?L"Waiting for the smart filter":L"Ожидаем умный фильтр";
+ if(status.paused)return language?L"Paused while you use the viewer":L"Обработка приостановлена";
+ if(!status.discoveryComplete)return language?L"Finding images in your gallery…":L"Находим изображения в галерее…";
+ uint64_t seconds=uint64_t(ceil((status.reviewTotal-status.reviewCompleted)*status.secondsPerFile));
+ std::wstring duration;
+ if(seconds>=3600)duration=std::to_wstring(((seconds+59)/60)/60)+(language?L" h ":L" ч ")+std::to_wstring(((seconds+59)/60)%60)+(language?L" min":L" мин");
+ else if(seconds>=60)duration=std::to_wstring((seconds+59)/60)+(language?L" min":L" мин");
+ else duration=std::to_wstring(seconds)+(language?L" sec":L" с");
+ return (language?L"About ":L"Осталось примерно ")+duration;
+}
+void PaintGalleryReview(float w,float h,const Palette& p){
+ float alpha=Clamp(reviewReveal.v,0,1),morph=Clamp(reviewMorph.v,0,1);
+ if(alpha>.004f){
+  auto status=GalleryReviewStatus();
+  float popupW=(std::min)(520.f,w-40.f),popupH=(std::min)(340.f,h-40.f);
+  auto popup=D2D1::RectF((w-popupW)/2,(h-popupH)/2,(w+popupW)/2,(h+popupH)/2);
+  float toastW=(std::min)(350.f,w-40.f);
+  auto compact=D2D1::RectF(w-toastW-20,h-146,w-20,h-20);
+  auto lerp=[&](float a,float b){return a+(b-a)*morph;};
+  auto body=D2D1::RectF(lerp(popup.left,compact.left),lerp(popup.top,compact.top),lerp(popup.right,compact.right),lerp(popup.bottom,compact.bottom));
+  body=Shift(body,0,12*(1-alpha));
+  Ink()->SetColor(Fade(p.sunk,.58f*alpha*(1-morph)));Dc()->FillRectangle(D2D1::RectF(0,0,w,h),Ink());
+  auto surface=D2D1::RoundedRect(body,lerp(32,26),lerp(32,26));SoftShadow(surface,.4f*alpha);Glass(surface,p,alpha,D2D1::Matrix3x2F::Identity());
+  float x=body.left+lerp(28,20),right=body.right-lerp(28,20),top=body.top+lerp(24,16);
+  float full=alpha*Clamp(1-morph*2,0,1),compactAlpha=alpha*Clamp((morph-.3f)/.7f,0,1);
+  bool ready=status.reviewReady;
+  if(full>.004f){
+   Icon(ready?IcCheck:IcGridPhoto,D2D1::RectF(x,top,x+24,top+24),Fade(p.accent,full),1.8f);
+   Write(language?L"SMART GALLERY":L"УМНАЯ ГАЛЕРЕЯ",D2D1::RectF(x+34,top,right,top+24),F_Section,Fade(p.dim,full));
+   Write(ready?(language?L"Your gallery is ready":L"Галерея размечена"):(language?L"Preparing your gallery":L"Знакомимся с галереей"),D2D1::RectF(x,top+42,right,top+80),F_Heading,Fade(p.text,full));
+   std::wstring caption=ready?(language?L"Apply smart filtering? Icons and other non-photo images will be hidden from the gallery.":L"Применить умную фильтрацию? Иконки и другие нефотографические изображения будут скрыты из галереи."):(language?L"This is the first review of your gallery. You can keep browsing; images stay in place until you apply the results.":L"Галерея ещё не размечена — обрабатываем её сейчас. Можно продолжать просмотр: до вашего подтверждения состав галереи сохранится.");
+   auto font=Font(F_Row);auto wrapping=font->GetWordWrapping();auto alignment=font->GetParagraphAlignment();
+   font->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);font->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+   Write(caption,D2D1::RectF(x,top+90,right,top+157),F_Row,Fade(p.dim,full));
+   font->SetWordWrapping(wrapping);font->SetParagraphAlignment(alignment);
+  }
+  if(compactAlpha>.004f){
+   Write(language?L"Preparing gallery":L"Размечаем галерею",D2D1::RectF(x,top,right-48,top+25),F_Row,Fade(p.text,compactAlpha));
+   Hotspot(IdReviewToast,body);
+  }
+  float progressY=lerp(popup.top+214,compact.top+70)+12*(1-alpha);
+  float fraction=Clamp(reviewProgress.v,0,1);
+  auto track=D2D1::RoundedRect(D2D1::RectF(x,progressY,right,progressY+8),4,4);
+  Ink()->SetColor(Fade(p.track,alpha));Dc()->FillRoundedRectangle(track,Ink());
+  if(fraction>.002f){Ink()->SetColor(Fade(p.accent,alpha));Dc()->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x,progressY,x+(right-x)*fraction,progressY+8),4,4),Ink());}
+  std::wstring count=std::to_wstring(status.reviewCompleted)+L" / "+std::to_wstring(status.reviewTotal);
+  std::wstring percent=std::to_wstring(int(fraction*100+.1f))+L"%";
+  Write(count,D2D1::RectF(x,progressY-27,right-55,progressY-7),F_Section,Fade(p.dim,alpha));
+  Write(percent,D2D1::RectF(right-48,progressY-27,right,progressY-7),F_Value,Fade(p.text,alpha));
+  std::wstring remaining=ready?(language?L"Review complete":L"Обработка завершена"):GalleryReviewRemaining(status);
+  if(ready&&status.reviewUnreadable)remaining+=(language?L" · Unreadable, kept visible: ":L" · Не прочитано, оставлено: ")+std::to_wstring(status.reviewUnreadable);
+  if(!status.error.empty()&&!status.modelReady)remaining=language?L"Smart filter unavailable. Your images are kept visible.":L"Умный фильтр недоступен. Изображения остаются видимыми.";
+  Write(remaining,D2D1::RectF(x,progressY+18,right,progressY+42),F_Small,Fade(p.dim,alpha));
+  if(full>.01f&&morph<.15f){
+   float bottom=body.bottom-24,buttonTop=bottom-42;
+   auto button=[&](int id,D2D1_RECT_F r,const wchar_t* label,bool primary){
+    Hotspot(id,r);Ink()->SetColor(Fade(primary?p.accent:p.hover,full));Dc()->FillRoundedRectangle(D2D1::RoundedRect(r,21,21),Ink());
+    Write(label,r,F_Button,Fade(primary?D2D1::ColorF(1.f,.95f,.85f,1.f):p.text,full));
+   };
+   if(ready){float mid=(x+right)/2;button(IdReviewLater,D2D1::RectF(x,buttonTop,mid-6,bottom),language?L"Later":L"Позже",false);button(IdReviewApply,D2D1::RectF(mid+6,buttonTop,right,bottom),language?L"Yes, apply":L"Да, применить",true);}
+   else button(IdReviewUnderstood,D2D1::RectF(x,buttonTop,right,bottom),language?L"GOT IT":L"Я ПОНЯЛ",true);
+  }
+ }
+ if(reviewFade.v>.004f){Ink()->SetColor(D2D1::ColorF(p.sunk.r,p.sunk.g,p.sunk.b,Clamp(reviewFade.v,0,1)));Dc()->FillRectangle(D2D1::RectF(0,0,w,h),Ink());}
+}
 void PaintEmpty(float w,float h,const Palette& p){
  Write(L"Vetro Look",D2D1::RectF(w/2-220,h/2-70,w/2+220,h/2-28),F_Big,p.text);
  Write(T(S_Tagline),D2D1::RectF(w/2-260,h/2-18,w/2+260,h/2+8),F_Row,p.dim);
@@ -3271,7 +3526,12 @@ float SizeToT(uint64_t bytes){if(!bytes)return 0;float t=logf(float(double(bytes
 uint64_t TToSize(float t){if(t<=.004f)return 0;if(t>=.996f)return ~0ull;return uint64_t(1024.0*pow(100.0*GB/1024.0,double(t)));}
 
 ComPtr<ID2D1Bitmap> GridBitmap(const std::wstring& path){
- if(thumbBitmaps.size()>800)thumbBitmaps.clear(); // crude cap; cheap to repopulate from thumbs.cpp's own cache
+ if(thumbBitmaps.size()>=512&&!thumbBitmaps.count(path)){
+  auto oldest=thumbBitmaps.begin();
+  for(auto it=thumbBitmaps.begin();it!=thumbBitmaps.end();++it)if(thumbBitmapUsed[it->first]<thumbBitmapUsed[oldest->first])oldest=it;
+  thumbBitmapUsed.erase(oldest->first);thumbBitmaps.erase(oldest);
+ }
+ thumbBitmapUsed[path]=GetTickCount64();
  ThumbRequest(path);
  auto found=thumbBitmaps.find(path);
  if(found!=thumbBitmaps.end())return found->second;
@@ -3291,90 +3551,84 @@ void DrawCover(D2D1_RECT_F cell,float radius,ID2D1Bitmap* image,D2D1_COLOR_F fal
  float coverage=(std::max)(Width(cell)/size.width,Height(cell)/size.height);
  float sw=Width(cell)/coverage,sh=Height(cell)/coverage;
  D2D1_RECT_F source=D2D1::RectF((size.width-sw)/2,(size.height-sh)/2,(size.width+sw)/2,(size.height+sh)/2);
- ComPtr<ID2D1BitmapBrush> brush;
- auto props=D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_CLAMP,D2D1_EXTEND_MODE_CLAMP,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
- if(SUCCEEDED(Dc()->CreateBitmapBrush(image,props,&brush))){
-  brush->SetTransform(D2D1::Matrix3x2F::Translation(-source.left,-source.top)*
-   D2D1::Matrix3x2F::Scale(coverage,coverage)*D2D1::Matrix3x2F::Translation(cell.left,cell.top));
-  Dc()->FillRoundedRectangle(rounded,brush.Get());
- }
+ DrawRoundedBitmap(image,cell,radius,source);
 }
 // Top bar shared by Library and Album: branding-or-back on the left, a
 // search field taking the middle, and a floating icon dock plus the
 // folders/photos toggle on the right.
 constexpr float AlbumTitleW=200;
+#include "browser-ui.inc"
+
 void LayoutLibraryChrome(float w,bool isAlbum){
- float y0=Margin,y1=Margin+Bubble;
- float brandWidth=isAlbum?Bubble+AlbumTitleW+20:176.f;
- rects[IdLibBrand]=D2D1::RectF(Margin,y0,Margin+brandWidth,y1);
- if(isAlbum)Hotspot(IdLibBack,D2D1::RectF(Margin+4,y0+4,Margin+Bubble-4,y1-4));
- auto winBar=LayoutWindowButtons(w);
- float dockWidth=3*Cell+12,dockRight=winBar.left-10;
- D2D1_RECT_F dock=D2D1::RectF(dockRight-dockWidth,y0,dockRight,y1);
- rects[IdDockBar]=dock;
- Hotspot(IdLibRescan,D2D1::RectF(dock.left+6,y0+2,dock.left+6+Cell,y1-2));
- Hotspot(IdLibSort,D2D1::RectF(dock.left+6+Cell,y0+2,dock.left+6+2*Cell,y1-2));
- Hotspot(IdLibFilter,D2D1::RectF(dock.left+6+2*Cell,y0+2,dock.left+6+3*Cell,y1-2));
- float toggleWidth=2*Cell+10,toggleRight=dock.left-10;
- D2D1_RECT_F toggle=D2D1::RectF(toggleRight-toggleWidth,y0,toggleRight,y1);
- rects[IdThemeRow]=toggle; // reused purely as a rect slot, no relation to the theme row
- Hotspot(IdLibViewFolders,D2D1::RectF(toggle.left+5,y0+5,toggle.left+5+Cell,y1-5));
- Hotspot(IdLibViewPhotos,D2D1::RectF(toggle.right-5-Cell,y0+5,toggle.right-5,y1-5));
- float searchLeft=R(IdLibBrand).right+12,searchRight=toggle.left-14;
- D2D1_RECT_F search=D2D1::RectF(searchLeft,y0+2,(std::max)(searchLeft+120,searchRight),y1-2);
- Hotspot(IdLibSearch,search);
+ float y0=106,y1=y0+Bubble;
+ float brandWidth=(std::min)(w-174,isAlbum?390.f:Measure(L"VETRO LOOK",F_Display,w)+92.f);
+ rects[IdLibBrand]=D2D1::RectF(14,8,14+brandWidth,94);
+ Hotspot(IdLibMenu,D2D1::RectF(24,22,68,66));
+ if(isAlbum)Hotspot(IdLibBack,D2D1::RectF(76,26,112,62));
+ LayoutWindowButtons(w);
+ float right=w-24,dockW=3*Cell+12;
+ auto dock=D2D1::RectF(right-dockW,y0,right,y1);rects[IdDockBar]=dock;
+ const int actions[]={IdLibRescan,IdLibSort,IdLibFilter};
+ for(int i=0;i<3;i++)Hotspot(actions[i],D2D1::RectF(dock.left+6+i*Cell,y0+2,dock.left+6+(i+1)*Cell,y1-2));
+ float toggleW=w<900?204.f:240.f;
+ auto toggle=D2D1::RectF(24,y0,24+toggleW,y1);rects[IdThemeRow]=toggle;
+ Hotspot(IdLibViewFolders,D2D1::RectF(toggle.left+4,y0+4,toggle.left+toggleW/2,y1-4));
+ Hotspot(IdLibViewPhotos,D2D1::RectF(toggle.left+toggleW/2,y0+4,toggle.right-4,y1-4));
+ float scopeW=w<900?132.f:178.f;
+ Hotspot(IdQuickScope,D2D1::RectF(dock.left-12-scopeW,y0,dock.left-12,y1));
+ Hotspot(IdLibSearch,D2D1::RectF(toggle.right+12,y0,R(IdQuickScope).left-10,y1));
 }
 void PaintLibraryChrome(float w,const Palette& p,bool isAlbum,const std::wstring& title){
  (void)w;
  auto brand=R(IdLibBrand);
- Glass(D2D1::RoundedRect(brand,Bubble/2,Bubble/2),p,1.f,D2D1::Matrix3x2F::Identity());
+ // The masthead identifies the collection. Its red disc is the same primary
+ // accent used for active controls, rather than a second decoration palette.
+ Glass(D2D1::RoundedRect(brand,34,34),p,1.f,D2D1::Matrix3x2F::Identity());
  if(isAlbum){
-  auto r=R(IdLibBack);
-  D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
-  auto lift=Lift(r,IdLibBack);Dc()->SetTransform(lift*Mat(previous));
-  if(Hover(IdLibBack)>.01f||Press(IdLibBack)>.01f){Ink()->SetColor(Fade(p.hover,Hover(IdLibBack)));Dc()->FillRoundedRectangle(D2D1::RoundedRect(r,Height(r)/2,Height(r)/2),Ink());}
-  Icon(IcBack,Shift(Inset(r,12),-1.5f*Hover(IdLibBack),0),p.text,1.9f);
-  Dc()->SetTransform(previous);
-  Write(Elide(title,F_Row,AlbumTitleW),D2D1::RectF(r.right+8,brand.top,brand.right-14,brand.bottom),F_Row,p.text);
+  PaintMenuMorph(R(IdLibMenu),p,1.f);
+  IconButton(IdLibBack,IcBack,p,1,p.text);
+  Write(Elide(favouritesOpen?T(S_Favourites):title,F_Heading,Width(brand)-116),D2D1::RectF(116,18,brand.right,64),F_Heading,p.text);
+  Write(std::to_wstring(albumPhotos.size())+L" "+T(S_Photos),D2D1::RectF(116,65,brand.right,85),F_Section,p.dim);
  }else{
-  Icon(IcGridPhoto,D2D1::RectF(Margin+2,Margin+8,Margin+30,Margin+36),p.accent,1.7f,true);
-  Write(L"Vetro Look",D2D1::RectF(Margin+38,Margin+2,Margin+180,Margin+22),F_Row,p.text);
-  Write(T(S_AppTagline),D2D1::RectF(Margin+38,Margin+21,Margin+180,Margin+38),F_Small,p.faint);
+  PaintMenuMorph(R(IdLibMenu),p,1.f);
+  Write(L"VETRO LOOK",D2D1::RectF(72,10,brand.right,66),F_Display,p.text);
+  Write(IndexIsScanning()?T(S_Indexing)+std::wstring(L"  ·  ")+std::to_wstring(IndexKnownPhotoCount())+L" "+T(S_Photos):std::to_wstring(libFolders.size())+L" "+RuPlural(libFolders.size(),S_Folder1,S_Folder2to4,S_Folder5plus)+L"  ·  "+std::to_wstring(IndexKnownPhotoCount())+L" "+T(S_Photos),D2D1::RectF(74,67,brand.right,86),F_Section,p.dim);
  }
+ auto scope=R(IdQuickScope);
+ Glass(D2D1::RoundedRect(scope,22,22),p,1,D2D1::Matrix3x2F::Identity());PlateFor(IdQuickScope,scope,p,1,22);
+ const wchar_t* scopeNamesRu[]={L"Эта папка",L"С подпапками",L"Везде"};const wchar_t* scopeNamesEn[]={L"Current folder",L"Subfolders",L"Everywhere"};
+ Write((language?scopeNamesEn:scopeNamesRu)[searchScope],D2D1::RectF(scope.left+12,scope.top,scope.right-24,scope.bottom),F_Button,p.text);
+ Icon(IcChevron,D2D1::RectF(scope.right-24,scope.top+14,scope.right-10,scope.bottom-14),p.dim,1.4f);
  auto search=R(IdLibSearch);
- bool active=libSearchFocused||!libSearch.empty();
  Glass(D2D1::RoundedRect(search,Bubble/2,Bubble/2),p,1,D2D1::Matrix3x2F::Identity());
- Ink()->SetColor(Fade(libSearchFocused?p.accent:p.cardEdge,libSearchFocused?.9f:.7f));
- Dc()->DrawRoundedRectangle(D2D1::RoundedRect(search,Bubble/2,Bubble/2),Ink(),libSearchFocused?1.6f:1.f);
- Icon(IcSearch,D2D1::RectF(search.left+13,search.top+11,search.left+35,search.bottom-11),p.faint,1.6f);
- std::wstring shown=libSearch.empty()?((!isAlbum&&libView==ViewFolders)?T(S_SearchFolders):T(S_SearchPhotos)):libSearch;
- Write(shown,D2D1::RectF(search.left+42,search.top,search.right-16,search.bottom),F_Row,libSearch.empty()?p.faint:p.text);
- if(active&&fmod(Now(),1.0)<0.55&&libSearchFocused){
-  float tx=search.left+42+Measure(libSearch,F_Row,Width(search))+2;
-  Ink()->SetColor(Fade(p.text,.85f));
-  Dc()->FillRectangle(D2D1::RectF(tx,search.top+13,tx+1.4f,search.bottom-13),Ink());
+ if(libSearchFocused){Ink()->SetColor(p.accent);Dc()->DrawRoundedRectangle(D2D1::RoundedRect(Inset(search,1),Bubble/2-1,Bubble/2-1),Ink(),1.5f);}
+ Icon(IcSearch,D2D1::RectF(search.left+13,search.top+11,search.left+35,search.bottom-11),p.dim,1.8f);
+ auto shown=libSearch.empty()?((!isAlbum&&libView==ViewFolders)?T(S_SearchFolders):T(S_SearchPhotos)):libSearch;
+ Write(shown,D2D1::RectF(search.left+44,search.top,search.right-14,search.bottom),F_Row,libSearch.empty()?p.dim:p.text);
+ if(libSearchFocused&&fmod(Now(),1.0)<.55){
+  float tx=(std::min)(search.right-12,search.left+44+Measure(libSearch,F_Row,Width(search)-60)+2);
+  Ink()->SetColor(p.accent);Dc()->FillRectangle(D2D1::RectF(tx,search.top+12,tx+1.5f,search.bottom-12),Ink());
  }
  auto dock=R(IdDockBar);
- Glass(D2D1::RoundedRect(dock,Bubble/2,Bubble/2),p,1.f,D2D1::Matrix3x2F::Identity());
- IconButton(IdLibRescan,IcRotate,p,1.f,IndexIsScanning()?p.accent:p.text,IndexIsScanning()?scanSpin:0.f);
- IconButton(IdLibSort,IcSortLines,p,1.f,sortReveal.target>.5f?p.accent:p.text);
- IconButton(IdLibFilter,IcFilter,p,1.f,filtersActive||filterReveal.target>.5f?p.accent:p.text);
+ Glass(D2D1::RoundedRect(dock,Bubble/2,Bubble/2),p,1,D2D1::Matrix3x2F::Identity());
+ IconButton(IdLibRescan,IcRotate,p,1,IndexIsScanning()?p.accent:p.text,IndexIsScanning()?scanSpin:0.f);
+ IconButton(IdLibSort,IcSortLines,p,1,sortOpen?p.accent:p.text);
+ IconButton(IdLibFilter,IcFilter,p,1,filtersActive||filterOpen?p.accent:p.text);
  auto toggle=R(IdThemeRow);
- Glass(D2D1::RoundedRect(toggle,Bubble/2,Bubble/2),p,1.f,D2D1::Matrix3x2F::Identity());
- auto folderBtn=R(IdLibViewFolders),photoBtn=R(IdLibViewPhotos);
- float switchT=Clamp(libViewSlide.v,0,1);
- auto lerp=[&](float a,float b){return a+(b-a)*switchT;};
- D2D1_RECT_F knob=D2D1::RectF(lerp(folderBtn.left,photoBtn.left),lerp(folderBtn.top,photoBtn.top),
-  lerp(folderBtn.right,photoBtn.right),lerp(folderBtn.bottom,photoBtn.bottom));
- Ink()->SetColor(Mix(p.glassLift,p.accent,.16f));Dc()->FillRoundedRectangle(D2D1::RoundedRect(knob,Height(knob)/2,Height(knob)/2),Ink());
- Ink()->SetColor(Fade(p.glassEdge,.9f));Dc()->DrawRoundedRectangle(D2D1::RoundedRect(knob,Height(knob)/2,Height(knob)/2),Ink(),1.f);
- IconButton(IdLibViewFolders,IcFolderIc,p,1.f,Mix(p.accent,p.faint,switchT));
- IconButton(IdLibViewPhotos,IcGridPhoto,p,1.f,Mix(p.faint,p.accent,switchT),0,true);
+ Glass(D2D1::RoundedRect(toggle,Bubble/2,Bubble/2),p,1,D2D1::Matrix3x2F::Identity());
+ for(int id:{IdLibViewFolders,IdLibViewPhotos}){
+  auto r=R(id);bool active=libView==(id==IdLibViewFolders?ViewFolders:ViewPhotosFlat);
+  if(active){Ink()->SetColor(Mix(p.glassLift,Fade(p.accent,.24f),.6f));Dc()->FillRoundedRectangle(D2D1::RoundedRect(r,Height(r)/2,Height(r)/2),Ink());}
+  auto text=active?p.accent:p.dim;
+  PlateFor(id,r,p,1,Height(r)/2);
+  Icon(id==IdLibViewFolders?IcFolderIc:IcGridPhoto,D2D1::RectF(r.left+10,r.top+9,r.left+28,r.bottom-9),text,1.6f,id==IdLibViewPhotos);
+  Write(id==IdLibViewFolders?(language?L"Folders":L"Папки"):(language?L"Photos":L"Фото"),D2D1::RectF(r.left+31,r.top,r.right-6,r.bottom),F_Button,text);
+ }
  PaintWindowButtons(p);
 }
 void PaintSortPopup(float w,const Palette& p,float alpha){
  alpha=Clamp(alpha,0,1);
- float panelW=220,x=R(IdLibSort).left+Cell/2-panelW/2,y=Margin+Bubble+10;
+ float panelW=220,x=R(IdLibSort).left+Cell/2-panelW/2,y=R(IdLibSort).bottom+12;
  x=Clamp(x,Margin,w-Margin-panelW);
  D2D1_RECT_F body=D2D1::RectF(x,y,x+panelW,y+3*RowH+3*RowGap+16);
  rects[IdSortPopup]=body;if(sortOpen&&alpha>.82f)hots.push_back({IdSortPopup,body});
@@ -3399,7 +3653,7 @@ void PaintSortPopup(float w,const Palette& p,float alpha){
 }
 void PaintFilterPopup(float w,float h,const Palette& p,float alpha){
  alpha=Clamp(alpha,0,1);
- float panelW=SideWidth,x=w-Margin-panelW,y=Margin+Bubble+14;
+ float panelW=SideWidth,x=w-Margin-panelW,y=R(IdLibFilter).bottom+12;
  D2D1_RECT_F body=D2D1::RectF(x,y,x+panelW,h-Margin);
  rects[IdFilterPopup]=body;if(filterOpen&&alpha>.82f)hots.push_back({IdFilterPopup,body});
  D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
@@ -3414,6 +3668,17 @@ void PaintFilterPopup(float w,float h,const Palette& p,float alpha){
   rects[id]=r;
   if(filterOpen&&alpha>.82f&&r.bottom>body.top+50&&r.top<body.bottom-10)hots.push_back({id,r});
  };
+ Write(language?L"SMART GALLERY":L"УМНАЯ ГАЛЕРЕЯ",D2D1::RectF(body.left+18,cy,body.right-18,cy+18),F_Section,Fade(p.faint,alpha));cy+=24;
+ auto smartChip=D2D1::RectF(body.left+18,cy,body.right-18,cy+34);filterHot(IdSmartToggle,smartChip);
+ FilterChip(IdSmartToggle,smartSettings.enabled?(language?L"Smart filter · on":L"Умный фильтр · вкл"): (language?L"Show all files":L"Показывать всё"),smartSettings.enabled,p,alpha);cy+=44;
+ const wchar_t* classesRu[]={L"Фото",L"Скриншоты",L"Документы",L"Иконки и UI",L"Арт",L"Прочее"};
+ const wchar_t* classesEn[]={L"Photos",L"Screenshots",L"Documents",L"Icons and UI",L"Artwork",L"Other"};
+ float sx=body.left+18,sy=cy;for(int i=0;i<6;i++){auto label=language?classesEn[i]:classesRu[i];float width=Measure(label,F_Button,240)+28;if(sx+width>body.right-18){sx=body.left+18;sy+=36;}
+  auto chip=D2D1::RectF(sx,sy,sx+width,sy+30);filterHot(IdSmartClass0+i,chip);FilterChip(IdSmartClass0+i,label,(smartSettings.categories&(1u<<i))!=0,p,alpha);sx+=width+6;}
+ cy=sy+40;auto uncertainChip=D2D1::RectF(body.left+18,cy,body.right-18,cy+30);filterHot(IdSmartUncertain,uncertainChip);
+ FilterChip(IdSmartUncertain,language?L"Uncertain results":L"Неуверенные результаты",smartSettings.uncertainOnly,p,alpha);cy+=40;
+ auto smartStatus=GalleryReviewStatus();std::wstring statusText=smartStatus.modelReady?(smartStatus.autoApply?(language?L"Smart filtering is active":L"Умная фильтрация активна"):(language?L"Results await your confirmation":L"Результаты ожидают вашего подтверждения")):(language?L"Smart filtering is unavailable":L"Умная фильтрация недоступна");
+ Write(statusText,D2D1::RectF(body.left+18,cy,body.right-18,cy+24),F_Small,Fade(p.dim,alpha));cy+=40;
  Write(T(S_FilterFormats),D2D1::RectF(body.left+18,cy,body.right-18,cy+18),F_Section,Fade(p.faint,alpha));
  cy+=24;
  float chipX=body.left+16,chipY=cy,chipH=28;
@@ -3487,141 +3752,53 @@ void PaintFilterPopup(float w,float h,const Palette& p,float alpha){
 // stack — folders should read as folders even before you know what's in them.
 void PaintFolderCard(int id,const FolderEntry& folder,D2D1_RECT_F cell,const Palette& p,float alpha){
  D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
- float scale=1.f+.02f*Hover(id)-.03f*Press(id);
- float cx=(cell.left+cell.right)/2,cy=(cell.top+cell.bottom)/2;
- auto base=D2D1::Matrix3x2F::Translation(-cx,-cy)*D2D1::Matrix3x2F::Scale(scale,scale)*
-  D2D1::Matrix3x2F::Translation(cx,cy-2.f*Hover(id))*Mat(previous);
- Dc()->SetTransform(base);
-
- float capH=38.f;
- D2D1_RECT_F icon=D2D1::RectF(cell.left+12,cell.top+32,cell.right-12,cell.bottom-capH);
- float iw=Width(icon),ih=Height(icon);
- float tabH=ih*.17f,tabW=iw*.46f;
- D2D1_RECT_F tabRect=D2D1::RectF(icon.left,icon.top,icon.left+tabW,icon.top+tabH+8);
- D2D1_RECT_F bodyRect=D2D1::RectF(icon.left,icon.top+ih*.42f+Hover(id)*12,icon.right,icon.bottom);
- D2D1_COLOR_F back=D2D1::ColorF(.08f,.34f,.76f,1);
- D2D1_COLOR_F front=D2D1::ColorF(.08f,.46f,.94f,1);
-
- Ink()->SetColor(Fade(back,alpha));Dc()->FillRoundedRectangle(D2D1::RoundedRect(tabRect,8,8),Ink());
- Dc()->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(icon.left,icon.top+tabH*.5f,icon.right,icon.bottom),10,10),Ink());
-
- // Up to four samples fan out from the opening, most-rotated drawn first so
- // the "cover" sample (index 0) ends up centred and on top.
- int count=(std::min)(4,int(folder.sampleCount));
- static const float angles1[1]={0},angles2[2]={-7,7},angles3[3]={-10,0,10},angles4[4]={-12,-4,4,12};
- const float* angles=count==1?angles1:count==2?angles2:count==3?angles3:angles4;
- float thumbW=iw*.60f,thumbH=ih*.78f;
- float fcx=(icon.left+icon.right)/2,fcy=icon.top+ih*.34f;
- D2D1_RECT_F thumbRect=D2D1::RectF(fcx-thumbW/2,fcy-thumbH/2,fcx+thumbW/2,fcy+thumbH/2);
+ auto base=Lift(cell,id);Dc()->SetTransform(base*Mat(previous));
+ float captionH=60;
+ auto photo=D2D1::RectF(cell.left,cell.top,cell.right,cell.bottom-captionH);
+ auto caption=D2D1::RectF(cell.left,photo.bottom,cell.right,cell.bottom);
+ int count=(std::min)(3,int(folder.sampleCount));
  std::vector<FolderTransition::Photo> captures;
- for(int i=count-1;i>=0;i--){
-  float fan=reducedMotion?0:Hover(id);
-  float dx=(i-(count-1)*.5f)*(5+fan*10),dy=-fan*(10+i*5)+Press(id)*2;
-  auto drawn=Shift(thumbRect,dx,dy);float angle=angles[i]*(1+fan*.25f);
-  Dc()->SetTransform(D2D1::Matrix3x2F::Rotation(angle,D2D1::Point2F(fcx+dx,fcy+dy))*base);
-  auto bmp=GridBitmap(folder.samples[i]);
-  auto tl=base.TransformPoint(D2D1::Point2F(drawn.left,drawn.top)),br=base.TransformPoint(D2D1::Point2F(drawn.right,drawn.bottom));
-  captures.push_back({folder.samples[i],D2D1::RectF(tl.x,tl.y,br.x,br.y),{},angle,bmp});
-  bool flying=folderTx.active&&folderTx.folder==folder.path;
-  if(!flying){DrawCover(drawn,7,bmp.Get(),Mix(p.sunk,p.accent,.3f));
-   Ink()->SetColor(Fade(D2D1::ColorF(1,1,1,.8f),alpha));Dc()->DrawRoundedRectangle(D2D1::RoundedRect(drawn,7,7),Ink(),1.f);}
+ for(int i=0;i<(std::max)(1,count);i++){
+  auto tile=photo;
+  if(count>1){
+   float split=photo.left+Width(photo)*.64f;
+   if(i==0)tile.right=split-2;
+   else{tile.left=split+2;if(count==3){float mid=(photo.top+photo.bottom)/2;if(i==1)tile.bottom=mid-2;else tile.top=mid+2;}}
+  }
+  auto bmp=count?GridBitmap(folder.samples[i]):ComPtr<ID2D1Bitmap>();
+  if(!(folderTx.active&&folderTx.folder==folder.path))DrawCover(tile,12,bmp.Get(),p.sunk);
+  if(count){auto tl=base.TransformPoint(D2D1::Point2F(tile.left,tile.top)),br=base.TransformPoint(D2D1::Point2F(tile.right,tile.bottom));
+   captures.push_back({folder.samples[i],D2D1::RectF(tl.x,tl.y,br.x,br.y),{},0,bmp});}
  }
- if(!folderTx.active){folderPreviews[NormalisePath(folder.path)]=std::move(captures);
-  auto tl=base.TransformPoint(D2D1::Point2F(bodyRect.left,bodyRect.top)),br=base.TransformPoint(D2D1::Point2F(bodyRect.right,bodyRect.bottom));
-  folderFronts[NormalisePath(folder.path)]=D2D1::RectF(tl.x,tl.y,br.x,br.y);}
- Dc()->SetTransform(base);
-
- // The front panel sits over the lower half of the fan, tucking the photos
- // into the folder's mouth instead of leaving them floating on top of it.
- D2D1_GRADIENT_STOP stops[]={{0,Fade(D2D1::ColorF(.24f,.70f,1.f,1),alpha)},{1,Fade(front,alpha)}};
- ComPtr<ID2D1GradientStopCollection> colors;ComPtr<ID2D1LinearGradientBrush> gradient;
- Dc()->CreateGradientStopCollection(stops,2,&colors);
- Dc()->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,bodyRect.top),D2D1::Point2F(0,bodyRect.bottom)),colors.Get(),&gradient);
- if(gradient)Dc()->FillRoundedRectangle(D2D1::RoundedRect(bodyRect,12,12),gradient.Get());
- Ink()->SetColor(Fade(p.glassEdge,alpha*.8f));Dc()->DrawRoundedRectangle(D2D1::RoundedRect(bodyRect,12,12),Ink(),1.f);
-
- // A folder that holds a favourite says so, counting its whole virtual family
- // rather than only the directory the card happens to be named after.
+ if(!folderTx.active){folderPreviews[NormalisePath(folder.path)]=std::move(captures);folderFronts[NormalisePath(folder.path)]=D2D1::RectF(0,0,0,0);}
+ Ink()->SetColor(Fade(p.card,alpha));Dc()->FillRoundedRectangle(D2D1::RoundedRect(caption,12,12),Ink());
+ Ink()->SetColor(Fade(p.accent,.65f));Dc()->FillRectangle(D2D1::RectF(caption.left,caption.top+10,caption.left+3,caption.bottom-10),Ink());
+ Write(Elide(folder.name,F_Row,Width(cell)-32),D2D1::RectF(cell.left+14,caption.top+6,cell.right-12,caption.top+30),F_Row,Fade(p.text,alpha));
+ auto label=std::to_wstring(folder.photoCount)+L" "+T(S_Photos);
+ Write(label,D2D1::RectF(cell.left+14,caption.top+31,cell.right-12,cell.bottom-7),F_Section,Fade(p.dim,alpha));
  uint32_t favourites=FolderFavouriteCount(folder.path);
- for(auto& member:folder.members)if(NormalisePath(member)!=NormalisePath(folder.path))
-  favourites+=FolderFavouriteCount(member);
- if(favourites){
-  auto heart=D2D1::RectF(icon.right-30,icon.top+2,icon.right-6,icon.top+26);
-  Ink()->SetColor(Fade(D2D1::ColorF(0,0,0,.30f),alpha));
-  Dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F((heart.left+heart.right)/2,(heart.top+heart.bottom)/2),13,13),Ink());
-  Icon(IcHeart,Inset(heart,4),Fade(D2D1::ColorF(1.f,.42f,.5f,1.f),alpha),1.5f,true);
- }
- Write(folder.name,D2D1::RectF(cell.left+4,cell.bottom-capH+4,cell.right-4,cell.bottom-18),F_Row,Fade(p.text,alpha));
- std::wstring photoCount=std::to_wstring(folder.photoCount)+L" "+T(S_Photos);
- if(!folder.members.empty())photoCount+=L" · "+std::to_wstring(folder.members.size())+L" папки";
- Write(photoCount,D2D1::RectF(cell.left+4,cell.bottom-18,cell.right-4,cell.bottom-2),F_Small,Fade(p.faint,alpha));
+ for(auto& member:folder.members)if(NormalisePath(member)!=NormalisePath(folder.path))favourites+=FolderFavouriteCount(member);
+ if(favourites)Icon(IcHeart,D2D1::RectF(photo.right-30,photo.top+8,photo.right-8,photo.top+30),p.accent,1.6f,true);
  Dc()->SetTransform(previous);
 }
 // The Favourites card. Visibly not a folder: no tab, no manila body, a heart
 // instead, and the real liked photographs behind it.
 void PaintFavouritesCard(int id,D2D1_RECT_F cell,const Palette& p,float alpha){
  D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
- float scale=1.f+.02f*Hover(id)-.03f*Press(id);
- float cx=(cell.left+cell.right)/2,cy=(cell.top+cell.bottom)/2;
- auto base=D2D1::Matrix3x2F::Translation(-cx,-cy)*D2D1::Matrix3x2F::Scale(scale,scale)*
-  D2D1::Matrix3x2F::Translation(cx,cy-2.f*Hover(id))*Mat(previous);
- Dc()->SetTransform(base);
-
- float capH=38.f;
- D2D1_RECT_F face=D2D1::RectF(cell.left+12,cell.top+30,cell.right-12,cell.bottom-capH);
- D2D1_GRADIENT_STOP stops[]={
-  {0,Fade(D2D1::ColorF(.95f,.28f,.42f,1.f),alpha)},
-  {1,Fade(D2D1::ColorF(.76f,.16f,.44f,1.f),alpha)}};
- ComPtr<ID2D1GradientStopCollection> colours;ComPtr<ID2D1LinearGradientBrush> gradient;
- Dc()->CreateGradientStopCollection(stops,2,&colours);
- Dc()->CreateLinearGradientBrush(
-  D2D1::LinearGradientBrushProperties(D2D1::Point2F(face.left,face.top),D2D1::Point2F(face.right,face.bottom)),
-  colours.Get(),&gradient);
- if(gradient)Dc()->FillRoundedRectangle(D2D1::RoundedRect(face,14,14),gradient.Get());
-
- size_t shown=favouritePhotos.size()<3?favouritePhotos.size():size_t(3);
- if(shown){
-  // A fan of three real favourites, so the card is about the pictures rather
-  // than about the idea of favourites.
-  float iw=Width(face),ih=Height(face);
-  float thumbW=iw*.52f,thumbH=ih*.62f;
-  float fcx=(face.left+face.right)/2,fcy=(face.top+face.bottom)/2+ih*.02f;
-  static const float angles[3]={-9,0,9};
-  const float* fan=shown==1?angles+1:(shown==2?angles:angles);
-  for(size_t i=shown;i-->0;){
-   float lift=reducedMotion?0:Hover(id);
-   float dx=(float(i)-(shown-1)*.5f)*(7+lift*10),dy=-lift*8;
-   auto drawn=D2D1::RectF(fcx-thumbW/2+dx,fcy-thumbH/2+dy,fcx+thumbW/2+dx,fcy+thumbH/2+dy);
-   Dc()->SetTransform(D2D1::Matrix3x2F::Rotation(fan[shown==2&&i==1?2:i],D2D1::Point2F(fcx+dx,fcy+dy))*base);
-   auto bmp=GridBitmap(favouritePhotos[i].path);
-   DrawCover(drawn,8,bmp.Get(),Mix(p.sunk,p.accent,.25f));
-   Ink()->SetColor(Fade(D2D1::ColorF(1,1,1,.85f),alpha));
-   Dc()->DrawRoundedRectangle(D2D1::RoundedRect(drawn,8,8),Ink(),1.f);
-  }
-  Dc()->SetTransform(base);
+ Dc()->SetTransform(Lift(cell,id)*Mat(previous));
+ Ink()->SetColor(Fade(p.accent,alpha));Dc()->FillRoundedRectangle(D2D1::RoundedRect(cell,14,14),Ink());
+ auto cream=D2D1::ColorF(1.f,.96f,.87f,alpha);
+ Write(L"01",D2D1::RectF(cell.left+16,cell.top+6,cell.right-16,cell.top+64),F_Display,cream);
+ Icon(IcHeart,D2D1::RectF(cell.right-62,cell.top+18,cell.right-18,cell.top+62),cream,2,true);
+ if(!favouritePhotos.empty()){
+  auto preview=D2D1::RectF(cell.left+16,cell.top+76,cell.right-16,cell.bottom-62);
+  auto bmp=GridBitmap(favouritePhotos.front().path);DrawCover(preview,8,bmp.Get(),p.sunk);
  }else{
-  float mid=(face.top+face.bottom)/2;
-  Icon(IcHeart,D2D1::RectF((face.left+face.right)/2-26,mid-38,(face.left+face.right)/2+26,mid+14),
-   Fade(D2D1::ColorF(1,1,1,.92f),alpha),2.f,true);
-  Write(T(S_NoFavourites),D2D1::RectF(face.left+8,mid+14,face.right-8,mid+34),F_Small,
-   Fade(D2D1::ColorF(1,1,1,.86f),alpha));
-  // The hint is deliberately two short lines: a card this narrow elides a
-  // single long one in the middle, which reads as a rendering fault.
-  Write(T(S_NoFavouritesHint),D2D1::RectF(face.left+6,mid+31,face.right-6,mid+47),F_Small,
-   Fade(D2D1::ColorF(1,1,1,.62f),alpha));
-  Write(T(S_NoFavouritesHint2),D2D1::RectF(face.left+6,mid+45,face.right-6,mid+61),F_Small,
-   Fade(D2D1::ColorF(1,1,1,.62f),alpha));
+  Write(T(S_NoFavouritesHint),D2D1::RectF(cell.left+16,cell.top+95,cell.right-16,cell.top+120),F_Button,cream);
+  Write(T(S_NoFavouritesHint2),D2D1::RectF(cell.left+16,cell.top+120,cell.right-16,cell.top+142),F_Button,cream);
  }
- // The badge, always: it is what tells this card apart at a glance.
- D2D1_RECT_F badge=D2D1::RectF(face.right-38,face.top+8,face.right-8,face.top+38);
- Ink()->SetColor(Fade(D2D1::ColorF(0,0,0,.28f),alpha));
- Dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F((badge.left+badge.right)/2,(badge.top+badge.bottom)/2),15,15),Ink());
- Icon(IcHeart,Inset(badge,5),Fade(D2D1::ColorF(1,1,1,1),alpha),1.8f,true);
-
- Write(T(S_Favourites),D2D1::RectF(cell.left+4,cell.bottom-capH+4,cell.right-4,cell.bottom-18),F_Row,Fade(p.text,alpha));
- auto count=favouritePhotos.size();
- Write(std::to_wstring(count)+L" "+T(S_Photos),
-  D2D1::RectF(cell.left+4,cell.bottom-18,cell.right-4,cell.bottom-2),F_Small,Fade(p.faint,alpha));
+ Write(T(S_Favourites),D2D1::RectF(cell.left+16,cell.bottom-54,cell.right-16,cell.bottom-28),F_Row,cream);
+ Write(std::to_wstring(favouritePhotos.size())+L" "+T(S_Photos),D2D1::RectF(cell.left+16,cell.bottom-27,cell.right-16,cell.bottom-8),F_Section,cream);
  Dc()->SetTransform(previous);
 }
 void PaintPhotoCell(int id,const PhotoEntry& photo,D2D1_RECT_F cell,const Palette& p,float alpha){
@@ -3657,16 +3834,18 @@ GridPlacement LibraryGridFor(float w,float h,float& areaLeft,float& areaTop,floa
  // The Favourites card occupies the first cell of the folder grid. It is a
  // virtual collection, not a directory, so it is counted here rather than
  // inserted into libFolders where the indexer would have to know about it.
- size_t count=folders?libFolders.size()+1:albumPhotos.size();
- return PlanGrid(areaW,cellW,cellH,LibGap,count);
+ size_t count=folders?libFolders.size():albumPhotos.size();
+ auto grid=PlanGrid(areaW,cellW,cellH,LibGap,count);
+ grid.cellW=(areaW-LibGap*(grid.columns-1))/grid.columns;
+ return grid;
 }
 void PaintLibraryScreen(float w,float h,const Palette& p){
  LayoutLibraryChrome(w,false);
  float areaLeft,areaTop,areaW;
  auto grid=LibraryGridFor(w,h,areaLeft,areaTop,areaW);
- float bottomBar=h-40;
+ float bottomBar=h;
  auto timeline=PlanTimeline(areaW);
- float contentH=libView==ViewPhotosFlat?timeline.contentH+FavouriteChipH:grid.contentH;
+ float contentH=libView==ViewPhotosFlat?timeline.contentH:grid.contentH;
  libScrollExtent=(std::max)(0.f,contentH-(bottomBar-areaTop-12));
  libScroll=Clamp(libScroll,0,libScrollExtent);
  // The content plane runs behind the floating chrome. Clipping at LibTop
@@ -3674,67 +3853,39 @@ void PaintLibraryScreen(float w,float h,const Palette& p){
  Dc()->PushAxisAlignedClip(D2D1::RectF(0,0,w,bottomBar),D2D1_ANTIALIAS_MODE_ALIASED);
  size_t count=libView==ViewFolders?libFolders.size():albumPhotos.size();
  if(libView==ViewPhotosFlat){
-  // A shortcut, not a second copy of the pictures. The timeline stays the
-  // chronological source of truth; Favourites is a filter over it, reached
-  // from one compact chip that scrolls away with the content.
-  float chipY=areaTop-libScroll;
-  D2D1_RECT_F chip=D2D1::RectF(areaLeft,chipY,areaLeft+(std::min)(areaW,258.f),chipY+FavouriteChipH-10);
-  if(chip.bottom>-20&&chip.top<bottomBar+20){
-   Hotspot(IdFavouritesChip,chip);
-   float lift=Hover(IdFavouritesChip)-.6f*Press(IdFavouritesChip);
-   auto shape=D2D1::RoundedRect(Shift(chip,0,-2.f*lift),(chip.bottom-chip.top)/2,(chip.bottom-chip.top)/2);
-   Glass(shape,p,1.f,D2D1::Matrix3x2F::Identity());
-   Ink()->SetColor(Fade(Mix(p.cardEdge,p.accent,.25f+.5f*Hover(IdFavouritesChip)),.85f));
-   Dc()->DrawRoundedRectangle(shape,Ink(),1.f);
-   Icon(IcHeart,D2D1::RectF(shape.rect.left+14,shape.rect.top+11,shape.rect.left+36,shape.rect.bottom-11),
-    D2D1::ColorF(1.f,.36f,.44f,1.f),1.7f,favouritePhotos.empty()?false:true);
-   Write(T(S_Favourites),D2D1::RectF(shape.rect.left+44,shape.rect.top,shape.rect.right-58,shape.rect.bottom),F_Row,p.text);
-   Write(std::to_wstring(favouritePhotos.size()),
-    D2D1::RectF(shape.rect.right-52,shape.rect.top,shape.rect.right-16,shape.rect.bottom),F_Row,p.faint);
-  }
   for(size_t g=0;g<timelineGroups.size();++g){
-   float groupTop=areaTop-libScroll+FavouriteChipH+timeline.groupTops[g];
+   float groupTop=areaTop-libScroll+timeline.groupTops[g];
    auto& group=timelineGroups[g];
    int rows=int((group.photos.size()+size_t(timeline.columns)-1)/size_t(timeline.columns));
    float groupBottom=groupTop+TimelineHeaderH+rows*(AlbumCell+LibGap);
-   if(groupBottom<0||groupTop>bottomBar+40)continue;
+   if(groupBottom<0)continue;
+   if(groupTop>bottomBar+40)break;
    Write(TimelineDateLabel(group.day),D2D1::RectF(areaLeft,groupTop,areaLeft+areaW,groupTop+30),F_Timeline,p.text);
-   for(size_t local=0;local<group.photos.size();++local){
+   auto range=VisibleTimelineRange(groupTop,group.photos.size(),timeline.columns,bottomBar);
+   for(size_t local=range.first;local<range.second;++local){
     int col=int(local)%timeline.columns,row=int(local)/timeline.columns;
     D2D1_RECT_F cell=D2D1::RectF(areaLeft+col*(AlbumCell+LibGap),groupTop+TimelineHeaderH+row*(AlbumCell+LibGap),0,0);
     cell.right=cell.left+AlbumCell;cell.bottom=cell.top+AlbumCell;
     if(cell.bottom<0||cell.top>bottomBar+40)continue;
-    size_t i=group.photos[local];int id=IdCard0+int(i);Hotspot(id,cell);
+    size_t i=group.photos[local];int id=IdCard0+int(i);LibraryHotspot(id,cell,bottomBar);
     ThumbRequest(albumPhotos[i].path);
     if(!(hero.active&&albumPhotos[i].id==hero.photoId))PaintPhotoCell(id,albumPhotos[i],cell,p,1.f);
    }
   }
  }else{
-  size_t total=count+1;   // cell 0 is the virtual Favourites collection
-  size_t first=size_t((std::max)(0,int((libScroll-40)/(grid.cellH+LibGap))))*grid.columns;
+  size_t total=count;
+  size_t first=size_t((std::max)(0,int(floorf((libScroll-areaTop)/(grid.cellH+LibGap)))))*grid.columns;
   size_t last=(std::min)(total,first+size_t((h-areaTop+80)/(grid.cellH+LibGap)+3)*grid.columns);
   for(size_t slot=first;slot<last;slot++){
    auto cell=GridCell(grid,areaLeft,areaTop-libScroll,LibGap,slot);
    if(cell.bottom<0||cell.top>bottomBar+40)continue;
-   if(slot==0){Hotspot(IdFavourites,cell);PaintFavouritesCard(IdFavourites,cell,p,1.f);continue;}
-   size_t i=slot-1;
-   int id=IdCard0+int(i);Hotspot(id,cell);PaintFolderCard(id,libFolders[i],cell,p,1.f);
+   size_t i=slot;
+   int id=IdCard0+int(i);LibraryHotspot(id,cell,bottomBar);PaintFolderCard(id,libFolders[i],cell,p,1.f);
   }
  }
  Dc()->PopAxisAlignedClip();
  if(count==0&&!IndexIsScanning()&&libView!=ViewFolders)
   Write(T(S_NoPhotosFound),D2D1::RectF(w/2-200,h/2-14,w/2+200,h/2+14),F_Row,p.dim);
- // status footer
- std::wstring left;
- if(IndexIsScanning())left=T(S_Indexing)+std::wstring(L" ")+std::to_wstring(IndexKnownPhotoCount())+L" "+T(S_Photos);
- else{
-  auto n=libFolders.size();
-  left=T(S_Found)+std::wstring(L" ")+std::to_wstring(n)+L" "+RuPlural(n,S_Folder1,S_Folder2to4,S_Folder5plus)+
-   L"  •  "+std::to_wstring(IndexKnownPhotoCount())+L" "+T(S_Photos);
- }
- Write(left,D2D1::RectF(Margin,h-30,w/2,h-8),F_Meta,p.faint);
- std::wstring right=IndexIsScanning()?T(S_LibraryUpdating):T(S_LibraryUpdated);
- Write(right,D2D1::RectF(w/2,h-30,w-Margin,h-8),F_Meta,p.faint);
 
 }
 D2D1_RECT_F FindAlbumCellRect(uint64_t photoId,float w,float h){
@@ -3744,13 +3895,13 @@ D2D1_RECT_F FindAlbumCellRect(uint64_t photoId,float w,float h){
  auto& scroll=screen==ScrLibrary?libScroll:albumScroll;
  if(screen==ScrLibrary&&libView==ViewPhotosFlat){
   auto cell=TimelinePhotoRect(photoId,areaLeft,areaTop,areaW,scroll);
-  float bottomBar=h-40;
+  float bottomBar=h;
   if(cell.bottom<0||cell.top>bottomBar+40)return D2D1::RectF(0,0,0,0);
   return cell;
  }
  for(size_t i=0;i<albumPhotos.size();i++)if(albumPhotos[i].id==photoId){
   auto cell=GridCell(grid,areaLeft,areaTop-scroll,LibGap,i);
-  float bottomBar=h-40;
+  float bottomBar=h;
   if(cell.bottom<0||cell.top>bottomBar+40)return D2D1::RectF(0,0,0,0);
   return cell;
  }
@@ -3794,11 +3945,11 @@ void PaintAlbumScreen(float w,float h,const Palette& p){
  LayoutLibraryChrome(w,true);
  float areaLeft,areaTop,areaW;
  auto grid=LibraryGridFor(w,h,areaLeft,areaTop,areaW,true);
- float bottomBar=h-30;
+ float bottomBar=h;
  albumScrollExtent=(std::max)(0.f,grid.contentH-(bottomBar-areaTop-12));
  albumScroll=Clamp(albumScroll,0,albumScrollExtent);
  Dc()->PushAxisAlignedClip(D2D1::RectF(0,0,w,bottomBar),D2D1_ANTIALIAS_MODE_ALIASED);
- size_t first=size_t((std::max)(0,int((albumScroll-40)/(grid.cellH+LibGap))))*grid.columns;
+ size_t first=size_t((std::max)(0,int(floorf((albumScroll-areaTop)/(grid.cellH+LibGap)))))*grid.columns;
  size_t last=(std::min)(albumPhotos.size(),first+size_t((h-areaTop+80)/(grid.cellH+LibGap)+3)*grid.columns);
  for(size_t i=first;i<last;i++){
   auto cell=GridCell(grid,areaLeft,areaTop-albumScroll,LibGap,i);
@@ -3807,14 +3958,11 @@ void PaintAlbumScreen(float w,float h,const Palette& p){
   bool flying=false;for(auto& photo:folderTx.photos)if(folderTx.active&&photo.path==albumPhotos[i].path)flying=true;
   if(flying)continue;
   int id=IdCard0+int(i);
-  Hotspot(id,cell);
+  LibraryHotspot(id,cell,bottomBar);
   PaintPhotoCell(id,albumPhotos[i],cell,p,1.f);
  }
  Dc()->PopAxisAlignedClip();
  if(albumPhotos.empty())Write(IndexFolderState(albumFolder)==FolderState::Indexing?T(S_Indexing):T(S_NoPhotos),D2D1::RectF(w/2-200,h/2-14,w/2+200,h/2+14),F_Row,p.dim);
- std::wstring left=std::to_wstring(albumPhotos.size())+L" "+T(S_Photos);
- Write(left,D2D1::RectF(Margin,h-24,w/2,h-4),F_Meta,p.faint);
- auto title=fs::path(albumFolder).filename().wstring();
 
 }
 void PaintHeroOverlay(float w,float h,const Palette& p){
@@ -3851,12 +3999,14 @@ void Frame(){
   auto slotKey=currentFrameKey.empty()?NormalisePath(currentPath)+L"|live":currentFrameKey;
   bitmap=GpuTextureFor(current,slotKey,slotKey);
   if(!bitmap)errorText=L"This image exceeds the renderer's bitmap limit.";
+ }
+ if(current&&!backdrop&&!current->hasAlpha){
   // A thumbnail of this file is usually already in memory, and reducing 180
   // pixels to 22 costs nothing. Only when there is none does this fall back
   // to a strided average of the frame itself.
   auto reduced=ThumbLookup(currentPath);
   if(!reduced&&backdropSource&&backdropSource->w<=512)reduced=backdropSource;
-  std::shared_ptr<Image> tiny=reduced?Downsample(reduced,22):std::shared_ptr<Image>();
+  std::shared_ptr<Image> tiny=reduced?Downsample(reduced,22):SampleBackdrop(*current,32);
   if(tiny&&tiny->w&&tiny->h){
    backdropIsAverage=false;
    Dc()->CreateBitmap(D2D1::SizeU(tiny->w,tiny->h),tiny->pixels.data(),tiny->w*4,
@@ -3868,7 +4018,7 @@ void Frame(){
   }
  }
  bool browsing=!preview&&screen!=ScrViewer;
- if(!preview&&screen==ScrViewer)Layout();
+ if(!preview&&screen==ScrViewer){Layout();LayoutBrowserPanel(w,h);}
  float radius=preview?32.f:(WindowMaximized()?0.f:26.f);
  auto shape=D2D1::RoundedRect(D2D1::RectF(0,0,w,h),radius,radius);
 
@@ -3883,7 +4033,7 @@ void Frame(){
    Dc()->SetTransform(D2D1::Matrix3x2F::Identity());
   }
  }else if(browsing){
-  Ink()->SetColor(Mix(D2D1::ColorF(.055f,.075f,.11f,1.f),D2D1::ColorF(.87f,.91f,.96f,1.f),themeMix.v));
+  Ink()->SetColor(Mix(D2D1::ColorF(.070f,.061f,.050f,1.f),D2D1::ColorF(.965f,.916f,.805f,1.f),themeMix.v));
   Dc()->FillRectangle(D2D1::RectF(0,0,w,h),Ink());
   // The destination is already present behind the shared photos. Fading an
   // entire duplicate screen here made the transition look like a dark veil;
@@ -3892,17 +4042,18 @@ void Frame(){
   else{
    float reveal=Clamp(libContentIn.v,0,1);
    D2D1_MATRIX_3X2_F previous;Dc()->GetTransform(&previous);
-   Dc()->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+   bool fading=reveal<.999f;
+   if(fading)Dc()->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1::Matrix3x2F::Identity(),.35f+.65f*reveal),nullptr);
    Dc()->SetTransform(D2D1::Matrix3x2F::Translation(libContentDirection*(1-reveal)*18.f,0)*Mat(previous));
    PaintLibraryScreen(w,h,p);
-   Dc()->SetTransform(previous);Dc()->PopLayer();
+   Dc()->SetTransform(previous);if(fading)Dc()->PopLayer();
   }
  }else if(mediaMode.InVideo()){
   // Video Mode owns the surface. Everything around it -- chrome, filmstrip,
   // panels, window shape -- is the same shell, drawn by the same code below.
   VideoModePaint(D2D1::RectF(0,0,w,h),p,
-   Mix(D2D1::ColorF(.055f,.075f,.11f,1.f),D2D1::ColorF(.87f,.91f,.96f,1.f),themeMix.v),1.f);
+   Mix(D2D1::ColorF(.070f,.061f,.050f,1.f),D2D1::ColorF(.965f,.916f,.805f,1.f),themeMix.v),1.f);
   if(!errorText.empty())Write(errorText,D2D1::RectF(40,h/2+90,w-40,h/2+140),F_Row,p.dim);
  }else{
   PaintBackdrop(w,h,p);
@@ -3921,6 +4072,7 @@ void Frame(){
   PaintLibraryChrome(w,p,screen==ScrAlbum,fs::path(albumFolder).filename().wstring());
   if(sortOpen||sortReveal.v>.004f)PaintSortPopup(w,p,sortReveal.v);
   if(filterOpen||filterReveal.v>.004f)PaintFilterPopup(w,h,p,filterReveal.v);
+  LayoutBrowserPanel(w,h);PaintPanel(p);
  }else if(!preview){
   // Set while Video Mode paints its overlay: the subtitle bubble and the toast
   // are drawn after the chrome's fading layer, not inside it.
@@ -4008,7 +4160,7 @@ void Frame(){
    PaintBack(p);
    PaintZoomBar(p);
    if(mediaMode.InVideo())PaintVideoTitle(w,p,R(IdDockBar).left,Margin+Bubble);
-   else PaintTitle(w,p,R(IdDockBar).left,R(IdZoomBar).right>0?R(IdZoomBar).right:Margin+Bubble);
+   else PaintTitle(w,p,R(IdWinBar).left-12,Margin+Bubble+16);
    PaintDock(p);
    PaintEditBubble(p);
    PaintWindowButtons(p);
@@ -4025,6 +4177,7 @@ void Frame(){
    PaintVideoToast(w,videoViewport,videoChrome);
   }
  }
+ if(browsing)PaintGalleryReview(w,h,p);
  GfxPresent(true);
  if(screen==ScrViewer&&current&&bitmap&&latencyId==latest&&currentGeneration==latencyId){
   double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-openStarted).count();
@@ -4147,6 +4300,7 @@ void MorphWindowTo(const RECT& target,HWND zOrder){
 // film is already composited here, and a copy of it would cost a second decode.
 void TogglePictureInPicture(){
  if(windowAnimating)return;
+ VideoModeDismissTransientUi();
  if(!pictureInPicture){
   if(!mediaMode.InVideo())return;
   pipRestoreMaximized=WindowMaximized();
@@ -4505,6 +4659,7 @@ void QualityPoll(){
  governor.Observe(sample);
  governorPolicy=governor.Policy();
  IndexSetPaused(!governorPolicy.backgroundIndexing);
+ SmartPause(!governorPolicy.backgroundIndexing||sample.windowHidden||sample.batterySaver||screen==ScrViewer||Now()-lastInteraction<.7);
  // The preview engine is secondary work by construction (12.3, P2), so it is
  // told what it may spend rather than deciding for itself. Cached frames keep
  // showing even when new decoding is not allowed.
@@ -4543,6 +4698,7 @@ bool Tick(float dt){
   CacheLogTelemetry();
  }
  QualityPoll();
+ busy|=TickGalleryReview(dt);
  if(fastNavigation&&Now()>=fastNavigationUntil)fastNavigation=false;
  busy|=chrome.Step(dt);
  if(mediaMode.InVideo())busy|=VideoModeStep(dt);
@@ -5043,6 +5199,16 @@ void KickProfileClassification(){
  std::thread([paths=std::move(paths)]{for(auto& p:paths)ClassifyProfile(p);}).detach();
 }
 void LibraryCommand(int id){
+ if(id==IdReviewUnderstood||id==IdReviewToast||id==IdReviewApply||id==IdReviewLater){GalleryReviewCommand(id);return;}
+ if(GalleryReviewModal()&&id!=IdWinClose&&id!=IdWinMin)return;
+ if(id==IdSmartToggle||id==IdSmartUncertain||(id>=IdSmartClass0&&id<=IdSmartClass5)){
+  if(id==IdSmartToggle){smartSettings.enabled=!smartSettings.enabled;smartSettings.uncertainOnly=false;}
+  else if(id==IdSmartUncertain){smartSettings.uncertainOnly=!smartSettings.uncertainOnly;smartSettings.enabled=true;}
+  else{smartSettings.categories^=1u<<(id-IdSmartClass0);smartSettings.enabled=true;}
+  SmartSavePreferences(smartSettings);RefreshAlbum();Wake();return;
+ }
+
+ if(id>=IdNavFolder0&&id<IdFilterExt0){for(auto& row:browserRows)if(row.id==id&&!row.path.empty()){auto path=row.path;NavigateFolder(path);return;}return;}
  // Commands can interrupt a transition.  Keeping this input path live also
  // protects against a renderer/device-loss frame leaving an animation flag
  // behind after its visual has disappeared.
@@ -5062,7 +5228,16 @@ void LibraryCommand(int id){
   ApplyFilterChanges();return;
  }
  switch(id){
- case IdLibBack:GoToLibrary();return;
+ case IdLibMenu:CloseLibraryPopups();OpenPanel(PanelLibrary);Wake();return;
+ case IdNavRecent:NavigateRecent();panelScroll=0;return;
+ case IdNavFavourites:browserPath.clear();browserChildren.clear();libSearch.clear();OpenFavourites();panelScroll=0;return;
+ case IdQuickScope:{
+  HMENU menu=CreatePopupMenu();const wchar_t* ru[]={L"Эта папка",L"Эта папка и подпапки",L"Везде"};const wchar_t* en[]={L"Current folder",L"Current folder and subfolders",L"Everywhere"};
+  for(int i=0;i<3;i++)AppendMenuW(menu,MF_STRING|(i==searchScope?MF_CHECKED:0),UINT_PTR(i+1),(language?en:ru)[i]);
+  auto r=R(IdQuickScope);POINT pt{LONG(r.left*dpi),LONG(r.bottom*dpi)};ClientToScreen(win,&pt);int chosen=TrackPopupMenu(menu,TPM_RETURNCMD,pt.x,pt.y,0,win,nullptr);DestroyMenu(menu);
+  if(chosen){searchScope=chosen-1;RefreshAlbum();Wake();}return;
+ }
+ case IdLibBack:if(!browserPath.empty()){auto parent=fs::path(browserPath).parent_path();if(!parent.empty()&&parent!=fs::path(browserPath))NavigateFolder(parent.wstring());else NavigateRecent();}else GoToLibrary();return;
  case IdFavourites:case IdFavouritesChip:CloseLibraryPopups();OpenFavourites();return;
  case IdLibSearch:libSearchFocused=true;CloseLibraryPopups();Wake();return;
  case IdLibSort:{bool opening=!sortOpen;CloseLibraryPopups();sortOpen=opening;sortReveal.To(opening?1.f:0.f);Wake();return;}
@@ -5092,7 +5267,7 @@ void LibraryCommand(int id){
  case IdFilterProfileP3:filterProfile=2;ApplyFilterChanges();return;
  case IdFilterProfileAdobe:filterProfile=3;ApplyFilterChanges();return;
  case IdFilterProfileNone:filterProfile=4;ApplyFilterChanges();return;
- case IdFilterClear:filterExtOn.clear();filterRawOnly=filterRegularOnly=false;filterProfile=0;filterSizeLo=0;filterSizeHi=~0ull;ApplyFilterChanges();return;
+ case IdFilterClear:smartSettings={false,63,false};SmartSavePreferences(smartSettings);filterExtOn.clear();filterRawOnly=filterRegularOnly=false;filterProfile=0;filterSizeLo=0;filterSizeHi=~0ull;ApplyFilterChanges();return;
  case IdFilterApply:filterOpen=false;filterReveal.To(0);ApplyFilterChanges();return;
  case IdWinMin:ShowWindow(win,SW_MINIMIZE);return;
  case IdWinMax:SendMessageW(win,WM_SYSCOMMAND,WindowMaximized()?SC_RESTORE:SC_MAXIMIZE,0);return;
@@ -5125,7 +5300,7 @@ void LibraryMouseDown(float x,float y){
   return;
  }
  if(id!=IdLibSearch)libSearchFocused=false;
- if(id==IdNone)CloseLibraryPopups();
+ if(id==IdNone){CloseLibraryPopups();if(panel==PanelLibrary)ClosePanel();}
 }
 void LibraryMouseMove(float x,float y){
  if(sizeDragLo||sizeDragHi){
@@ -5355,6 +5530,22 @@ void TestTick(){
   albumPhotos=std::move(saved);assetVariants=std::move(savedVariants);
  }
  static bool timelineTested=false;
+ static bool smartBrowserTested=false;
+ if(!smartBrowserTested){
+  smartBrowserTested=true;
+  bool boundaries=BrowserWithin(L"C:\\Pictures\\2026",L"c:\\pictures")&&!BrowserWithin(L"C:\\Pictures-old",L"C:\\Pictures")&&!BrowserWithin(L"C:\\Pictures",L"");
+  auto stack=BrowserAncestry(L"D:\\Pictures\\2026\\Japan\\Tokyo");bool ancestry=stack.size()==5&&stack.back().name==L"Tokyo"&&stack[2].name==L"2026";
+  auto assertTest=[&](bool ok,const wchar_t* name){Log(std::wstring(ok?L"PASS ":L"FAIL ")+name);if(!ok)testFailures++;};
+  assertTest(boundaries&&ancestry,L"folder scope boundaries and compact ancestry");
+  PhotoEntry file{L"D:\\assets\\icon.png",L"icon.png",L"png",10,20,30};Image tiny;tiny.w=tiny.h=180;tiny.hasAlpha=true;tiny.sourceW=tiny.sourceH=64;
+  auto icon=SmartDecide(file,&tiny,nullptr,false,0,64,64);assertTest(icon.visibility==SmartVisibility::Hidden&&icon.category==SmartClass::Icon,L"small transparent technical icon filtering");
+  auto large=SmartDecide(file,&tiny,nullptr,false,0,4000,3000);assertTest(large.visibility==SmartVisibility::Uncertain,L"thumbnail dimensions never hide a large transparent artwork");
+  std::array<float,6> scores{.0001f,0,0,.9999f,0,0};
+  auto camera=SmartDecide(file,&tiny,&scores,true,1,64,64);assertTest(camera.visibility==SmartVisibility::Visible,L"camera metadata wins over an icon prediction");
+  file.path=L"D:\\Pictures\\screenshot.png";
+  auto named=SmartDecide(file,&tiny,nullptr,false,0,180,180);auto missing=SmartDecide(file,nullptr,nullptr,false,0);assertTest(named.visibility==SmartVisibility::Uncertain&&missing.visibility==SmartVisibility::Uncertain,L"filename and missing thumbnail alone cannot hide a picture");
+  file.path=L"D:\\assets\\frame.NEF";auto raw=SmartDecide(file,&tiny,&scores,false,1,64,64);assertTest(raw.visibility==SmartVisibility::Visible,L"RAW remains visible regardless of neural prediction");
+ }
  if(!timelineTested){
   timelineTested=true;auto saved=albumPhotos;auto savedGroups=timelineGroups;
   SYSTEMTIME a{};a.wYear=2026;a.wMonth=9;a.wDay=7;a.wHour=12;
@@ -5554,8 +5745,64 @@ void TestTick(){
   if(policy)Log(L"PASS RAM cache policy simulated 8/16/32 GB and low-memory cancellation");
   else{Log(L"FAIL RAM cache policy");testFailures++;}
  }
+ // Synthetic tier checks above release their texture. Let the next frame
+ // upload the restored real image before evaluating decode/render.
+ if(current&&!bitmap){Wake();return;}
+ static bool surfaceRegressionTested=false;
+ if(!surfaceRegressionTested){
+  surfaceRegressionTested=true;
+  auto top=VisibleTimelineRange(268,100000,6,800);
+  auto middle=VisibleTimelineRange(-80000,100000,6,800);
+  bool bounded=top.second-top.first<=36&&middle.second-middle.first<=42&&middle.first>0;
+  Log((bounded?L"PASS ":L"FAIL ")+std::wstring(L"100000-photo day visits only visible rows: ")+std::to_wstring(middle.second-middle.first));
+  if(!bounded)testFailures++;
+  Image base;base.w=base.h=64;base.pixels.resize(64*64*4,0);
+  for(size_t i=3;i<base.pixels.size();i+=4)base.pixels[i]=255;
+  std::vector<uint8_t> white(32*32*4,255);ComPtr<ID2D1Bitmap> testTile;
+  Dc()->CreateBitmap(D2D1::SizeU(32,32),white.data(),32*4,
+   D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&testTile);
+  auto raster=Rasterise(base,[&](ID2D1DeviceContext*){DrawRoundedBitmap(testTile.Get(),D2D1::RectF(8,8,56,56),12,D2D1::RectF(0,0,32,32));});
+  unsigned smooth=0;if(raster)for(unsigned y=8;y<21;++y)for(unsigned x=8;x<21;++x){auto v=raster->pixels[(size_t(y)*64+x)*4];if(v>0&&v<255)++smooth;}
+  bool corners=raster&&smooth>=8&&raster->pixels[(8*64+8)*4]==0&&raster->pixels[(32*64+32)*4]==255;
+  Log((corners?L"PASS ":L"FAIL ")+std::wstring(L"rounded image mask has antialiased coverage: ")+std::to_wstring(smooth));
+  if(!corners)testFailures++;
+  for(auto& path:testFiles)if(fs::path(path).extension()==L".png"){
+   std::wstring decodeError;auto full=Decode(path,decodeError);auto scaled=DecodeRenderReady(path,32);
+   bool alpha=full&&scaled&&full->hasAlpha==scaled->hasAlpha;
+   if(alpha)Log(L"PASS scaled PNG keeps the actual transparency flag");else{Log(L"FAIL scaled PNG transparency");testFailures++;}
+   break;
+  }
+  Image bands;bands.w=128;bands.h=64;bands.pixels.resize(128*64*4,255);
+  for(unsigned y=0;y<64;++y)for(unsigned x=0;x<128;++x){auto at=(size_t(y)*128+x)*4;bands.pixels[at]=x<64?0:255;bands.pixels[at+1]=0;bands.pixels[at+2]=x<64?255:0;}
+  auto wash=SampleBackdrop(bands);
+  bool spatial=wash&&wash->w==32&&wash->pixels[2]>240&&wash->pixels[(wash->w-1)*4]>240;
+  if(spatial)Log(L"PASS ambient wash preserves spatial colours with bounded sampling");else{Log(L"FAIL ambient spatial wash");testFailures++;}
+ }
+ static bool chromeLayoutTested=false;
+ if(!chromeLayoutTested){
+  chromeLayoutTested=true;bool ok=true;
+  for(float width:{760.f,1180.f})for(bool album:{false,true}){
+   hots.clear();rects.clear();LayoutLibraryChrome(width,album);
+   auto toggle=R(IdThemeRow),search=R(IdLibSearch),dock=R(IdDockBar);
+   ok&=toggle.right<search.left&&search.right<dock.left&&Width(search)>=120;
+   ok&=R(IdLibSort).right<=R(IdLibFilter).left&&R(IdLibRescan).right<=R(IdLibSort).left;
+   ok&=R(IdLibViewFolders).right<=R(IdLibViewPhotos).left&&dock.right<=width;
+  }
+  hots.clear();rects.clear();
+  LibraryHotspot(IdCard0,D2D1::RectF(20,100,200,230),600);
+  ok&=HitTest(50,125)==IdNone&&HitTest(50,195)==IdCard0&&R(IdCard0).top==100;
+  Layout();
+  if(ok)Log(L"PASS floating library controls do not overlap and backdrop thumbnails cannot steal header clicks");
+  else{Log(L"FAIL Tokyo library layout");testFailures++;}
+ }
  if(testStage<int(testFiles.size())){
   if(testStage>0){
+   static bool reflectedTested=false;
+   if(current&&bitmap&&!current->hasAlpha&&!reflectedTested){
+    reflectedTested=true;
+    if(backdrop)Log(L"PASS cached foreground texture retains the photograph reflection");
+    else{Log(L"FAIL cached image lost backdrop");testFailures++;}
+   }
    if(!current||!bitmap){Log(L"FAIL decode/render");testFailures++;}
    else Log(L"PASS rendered "+currentPath+L" codec="+current->codec+L" decode_ms="+std::to_wstring(current->ms));
   }
@@ -5640,6 +5887,27 @@ void TestTick(){
  Log(L"DONE failures="+std::to_wstring(testFailures));
  DestroyWindow(win);
 }
+// The app icon follows the Windows theme the way Vetro Collection's launcher icon
+// follows night mode: resource 1 is the dark tile, 2 the light one. The taskbar and
+// tray belong to the system theme, not to the viewer's own light/dark switch.
+HICON ThemedAppIcon(){
+ DWORD light=0,size=sizeof(light);
+ RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+              L"SystemUsesLightTheme",RRF_RT_REG_DWORD,nullptr,&light,&size);
+ HINSTANCE instance=GetModuleHandleW(nullptr);
+ HICON icon=LoadIconW(instance,MAKEINTRESOURCEW(light?2:1));
+ return icon?icon:LoadIconW(instance,MAKEINTRESOURCEW(1));
+}
+void ApplyThemedAppIcon(HWND hwnd){
+ HICON icon=ThemedAppIcon();
+ if(!icon)return;
+ SetClassLongPtrW(hwnd,GCLP_HICON,reinterpret_cast<LONG_PTR>(icon));
+ SendMessageW(hwnd,WM_SETICON,ICON_BIG,reinterpret_cast<LPARAM>(icon));
+ SendMessageW(hwnd,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(icon));
+ NOTIFYICONDATAW tray{sizeof(tray)};
+ tray.hWnd=hwnd;tray.uID=1;tray.uFlags=NIF_ICON;tray.hIcon=icon;
+ Shell_NotifyIconW(NIM_MODIFY,&tray);   // fails harmlessly when there is no tray icon (test runs)
+}
 LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  if(msg==WM_KEYDOWN||msg==WM_MOUSEWHEEL||msg==WM_LBUTTONDOWN||
   (msg==WM_MOUSEMOVE&&(GET_X_LPARAM(lp)!=mouse.x||GET_Y_LPARAM(lp)!=mouse.y))){
@@ -5648,7 +5916,14 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  switch(msg){
  case WM_CREATE:win=hwnd;return 0;
  case WM_SYSCOMMAND:
-  if((wp&0xfff0)==SC_MAXIMIZE){AnimateWindow(true);return 0;}
+  // A maximise request while the same HWND is serving as PiP must first leave
+  // PiP. Maximising it in-place preserves pictureInPicture=true and produces a
+  // full-screen window with compact PiP chrome and broken restore semantics.
+  if((wp&0xfff0)==SC_MAXIMIZE){
+   if(pictureInPicture)TogglePictureInPicture();
+   else AnimateWindow(true);
+   return 0;
+  }
   if((wp&0xfff0)==SC_RESTORE&&WindowMaximized()){AnimateWindow(false);return 0;}
   break;
  case WM_NCACTIVATE:return TRUE;
@@ -5747,6 +6022,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   BOOL animations=TRUE;
   SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
   reducedMotion=!animations;
+  if(lp&&!wcscmp(reinterpret_cast<LPCWSTR>(lp),L"ImmersiveColorSet"))ApplyThemedAppIcon(hwnd);
   Wake();return 0;
  }
  case WM_ERASEBKGND:return 1;
@@ -5938,8 +6214,26 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   }
   Wake();return 0;
  }
- case IndexFolders:if(screen!=ScrViewer)RefreshLibrary();else Wake();return 0;
- case IndexProgress:Wake();return 0;
+ case AlbumReady:{
+  std::optional<AlbumResult> result;
+  {std::lock_guard lock(albumMx);result=std::move(albumResult);albumResult.reset();}
+  if(result&&result->generation==albumGeneration&&screen!=ScrViewer&&!favouritesOpen&&
+     result->flat==(screen==ScrLibrary&&libView==ViewPhotosFlat)&&result->folder==albumFolder){
+   albumPhotos=std::move(result->photos);assetVariants=std::move(result->variants);timelineGroups=std::move(result->groups);
+   if(reviewApplying&&result->generation==reviewApplyGeneration)reviewAlbumReady=true;
+   Log(L"LIBRARY photos="+std::to_wstring(albumPhotos.size())+L" worker_ms="+std::to_wstring(result->buildMs));
+   SetTimer(hwnd,11,3000,nullptr);
+   Wake();
+  }
+  return 0;
+ }
+ case WM_APP+91:if(reviewPreview){reviewPreview->reviewCompleted=reviewPreview->reviewTotal;reviewPreview->reviewReady=true;Wake();}return 0;
+ case SmartReady:
+  if(!GalleryReviewStatus().inventoryKnown)RequestSmartInventory();
+  if(GalleryReviewStatus().autoApply&&!reviewApplying&&screen!=ScrViewer&&!smartRefreshScheduled){smartRefreshScheduled=true;SetTimer(hwnd,13,900,nullptr);}Wake();return 0;
+ case BrowserReady:{auto result=BrowserTakeResult();if(result&&result->generation==browserGeneration&&result->path==browserPath){browserChildren=std::move(result->children);browserError=std::move(result->error);browserLoading=false;Wake();}return 0;}
+ case IndexFolders:if(screen!=ScrViewer){if(!libraryRefreshScheduled){libraryRefreshScheduled=true;SetTimer(hwnd,10,450,nullptr);}}else Wake();return 0;
+ case IndexProgress:if(!IndexIsScanning())RequestSmartInventory();Wake();return 0;
  case WM_DEVICECHANGE:
   if(wp==DBT_DEVICEARRIVAL||wp==DBT_DEVICEREMOVECOMPLETE)IndexDrivesChanged();
   return TRUE;
@@ -6045,12 +6339,18 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   return 0;
  }
  case WM_KEYDOWN:{
+  if(GalleryReviewModal()){
+   if(wp==VK_ESCAPE)GalleryReviewCommand(GalleryReviewStatus().reviewReady?IdReviewLater:IdReviewUnderstood);
+   else if(wp==VK_RETURN||wp==VK_SPACE)GalleryReviewCommand(GalleryReviewStatus().reviewReady?IdReviewApply:IdReviewUnderstood);
+   return 0;
+  }
   bool control=(GetKeyState(VK_CONTROL)&0x8000)!=0,shift=(GetKeyState(VK_SHIFT)&0x8000)!=0;
   if(!preview&&screen!=ScrViewer){
    if(wp==VK_ESCAPE){
+    if(panel==PanelLibrary){ClosePanel();return 0;}
     if(sortOpen||filterOpen){CloseLibraryPopups();Wake();return 0;}
     if(libSearchFocused){libSearchFocused=false;Wake();return 0;}
-    if(screen==ScrAlbum){GoToLibrary();return 0;}
+    if(screen==ScrAlbum){LibraryCommand(IdLibBack);return 0;}
     return 0;
    }
    if(libSearchFocused){
@@ -6061,6 +6361,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   }
   // A command-line Quick Look window is explicitly dismissed with Esc even
   // when an incidental panel is open.
+  if(wp==VK_ESCAPE&&pictureInPicture){TogglePictureInPicture();return 0;}
   if(wp==VK_ESCAPE&&quickLookInvocation){Close();return 0;}
   if(wp==VK_ESCAPE&&panel!=PanelNone){ClosePanel();return 0;}
   if(wp==VK_ESCAPE&&tool!=ToolNone){tool=ToolNone;painting=false;Wake();return 0;}
@@ -6196,6 +6497,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   }
   return 0;
  case WM_MOUSEWHEEL:{
+  if(GalleryReviewModal()||reviewApplying)return 0;
   if(preview)return 0;
   POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
   ScreenToClient(hwnd,&p);
@@ -6205,6 +6507,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    // Scrolling is direct manipulation, so a decorative fly-back must yield
    // immediately instead of leaving its photo pinned over the moving grid.
    hero.active=false;folderTx.active=false;
+   if(panel==PanelLibrary&&Inside(R(IdPanelBody),x,y)){panelScrollVel-=delta*700.f;Wake();return 0;}
    if((filterOpen||filterReveal.v>.1f)&&Inside(R(IdFilterPopup),x,y)){
     filterScrollVel-=delta*700.f;Wake();return 0;
    }
@@ -6243,6 +6546,7 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   }
   return 0;
  case WM_LBUTTONDOWN:
+  if(reviewApplying)return 0;
   if(preview){SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);return 0;}
   mouse={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
   // The transport bar is Video Mode's own surface, so it answers first. A click
@@ -6276,13 +6580,20 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   Wake();return 0;
  case WM_CAPTURECHANGED:dragImage=false;galleryDragging=false;sliderGrab=false;return 0;
  case WM_CONTEXTMENU:{
+  if(GalleryReviewModal()||reviewApplying)return 0;
   POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};if(point.x==-1||point.y==-1)GetCursorPos(&point);
   POINT client=point;ScreenToClient(hwnd,&client);int hit=HitTest(client.x/dpi,client.y/dpi);
+  if(screen!=ScrViewer&&!BrowserFolderAt(client.x/dpi,client.y/dpi).empty()){BrowserContextMenu(client.x/dpi,client.y/dpi);return 0;}
   if(screen!=ScrViewer&&!(screen==ScrLibrary&&libView==ViewFolders)&&hit>=IdCard0&&size_t(hit-IdCard0)<albumPhotos.size()){
-   auto& primary=albumPhotos[size_t(hit-IdCard0)];auto variants=assetVariants.find(primary.id);if(variants==assetVariants.end())return 0;
-   HMENU menu=CreatePopupMenu();for(size_t i=0;i<variants->second.size()&&i<30;++i)AppendMenuW(menu,MF_STRING,UINT(i+1),variants->second[i].name.c_str());
+   auto primary=albumPhotos[size_t(hit-IdCard0)];auto variants=assetVariants.find(primary.id);
+   HMENU menu=CreatePopupMenu();
+   AppendMenuW(menu,MF_STRING,101,language?L"Always show":L"Всегда показывать");
+   AppendMenuW(menu,MF_STRING,102,language?L"Hide from gallery":L"Скрывать из галереи");
+   AppendMenuW(menu,MF_STRING,103,language?L"Use automatic classification":L"Вернуть автоматическую классификацию");
+   if(variants!=assetVariants.end()){AppendMenuW(menu,MF_SEPARATOR,0,nullptr);for(size_t i=0;i<variants->second.size()&&i<30;++i)AppendMenuW(menu,MF_STRING,UINT(i+1),variants->second[i].name.c_str());}
    int choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,hwnd,nullptr);DestroyMenu(menu);
-   if(choice>0&&size_t(choice)<=variants->second.size()){auto& selected=variants->second[size_t(choice-1)];OpenPhotoFromAlbum(selected.path,primary.id,R(hit));}
+   if(choice>=101&&choice<=103){SmartSetOverride(primary,choice==101?1:choice==102?0:-1);RefreshAlbum();return 0;}
+   if(variants!=assetVariants.end()&&choice>0&&size_t(choice)<=variants->second.size()){auto& selected=variants->second[size_t(choice-1)];OpenPhotoFromAlbum(selected.path,primary.id,R(hit));}
    return 0;
   }
   if(screen!=ScrLibrary||libView!=ViewFolders)return 0;
@@ -6305,6 +6616,10 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   OpenExternal(p);return 0;
  }
  case WM_TIMER:
+  if(wp==13){if(Now()-lastInteraction<.7)return 0;KillTimer(hwnd,13);smartRefreshScheduled=false;if(screen!=ScrViewer&&GalleryReviewStatus().autoApply&&!reviewApplying)RefreshAlbum();return 0;}
+  if(wp==12){SpringFolderTick();if(fileDropActive&&IsWindowVisible(hwnd))Frame();return 0;}
+  if(wp==11){KillTimer(hwnd,11);auto frames=PacingUiStats();Log(L"LIBRARY ui_p95_ms="+std::to_wstring(frames.p95)+L" ui_max_ms="+std::to_wstring(frames.max));return 0;}
+  if(wp==10){KillTimer(hwnd,10);libraryRefreshScheduled=false;if(screen!=ScrViewer)RefreshLibrary();return 0;}
   if(wp==9){
    if(!mediaMode.InVideo()||!VideoModeRoute().IsUrl())return 0;
    bool started=VideoModeNetworkTick();
@@ -6334,7 +6649,8 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
   if(wp==3){
    if(!preview&&screen==ScrViewer){
     bool watching=current!=nullptr||mediaMode.InVideo();
-    chrome.To(watching&&panel==PanelNone&&tool==ToolNone&&!dragImage&&!loading&&Now()-lastInteraction>3.0?0.f:1.f);
+    double chromeDelay=pictureInPicture?1.25:3.0;
+    chrome.To(watching&&panel==PanelNone&&tool==ToolNone&&!dragImage&&!loading&&Now()-lastInteraction>chromeDelay?0.f:1.f);
     if(chrome.Moving())Wake();
    }
    else if(!preview&&chrome.target<1.f){chrome.To(1.f);}
@@ -6369,10 +6685,57 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  return DefWindowProcW(hwnd,msg,wp,lp);
 }
 
+#include "smart-tests.inc"
+// Isolated visual fixture: no index scan, registration, settings or model writes.
+int RunGalleryReviewPreview(HINSTANCE instance,const std::wstring& mode,const std::wstring& fixtureFolder){
+ testing=true;language=0;themeMix.Reset(0);screen=ScrLibrary;libView=ViewPhotosFlat;libContentIn.Reset(1);chrome.Reset(1);
+ SmartStatus state;state.modelReady=true;state.inventoryKnown=true;state.discoveryComplete=true;state.reviewTotal=1000;state.reviewCompleted=330;
+ if(mode==L"ready"){state.reviewCompleted=1000;state.reviewReady=true;reviewFinishedNotified=true;}
+ if(mode==L"toast"){reviewCollapsed=true;reviewMorph.Reset(1);}
+ reviewPreview=state;reviewReveal.Reset(1);reviewProgress.Reset(float(state.reviewCompleted)/state.reviewTotal);
+ WNDCLASSW cls{};cls.lpfnWndProc=Proc;cls.hInstance=instance;cls.lpszClassName=L"VetroLookGalleryReviewPreview";cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&cls);
+ win=CreateWindowExW(WS_EX_APPWINDOW|WS_EX_NOREDIRECTIONBITMAP,cls.lpszClassName,L"VetroLook Gallery Review Preview",WS_OVERLAPPEDWINDOW,150,100,1180,800,nullptr,nullptr,instance,nullptr);
+ if(!win)return 1;dpi=GetDpiForWindow(win)/96.f;ApplyCorners();if(!GfxCreate(win,dpi))return 2;
+ ThumbStart(win,ThumbReady);
+ FolderEntry folder;albumPhotos=IndexInspectDirectory(fixtureFolder,folder);SortPhotos(albumPhotos);RebuildTimeline();
+ ShowWindow(win,SW_SHOW);SetTimer(win,90,100,nullptr);Wake();
+ MSG event{};auto previous=std::chrono::steady_clock::now();bool running=true;
+ while(running){
+  while(PeekMessageW(&event,nullptr,0,0,PM_REMOVE)){if(event.message==WM_QUIT){running=false;break;}TranslateMessage(&event);DispatchMessageW(&event);}
+  if(!running)break;auto now=std::chrono::steady_clock::now();float dt=std::chrono::duration<float>(now-previous).count();previous=now;
+  bool moving=Tick((std::min)(dt,.05f));if(moving||needFrame){needFrame=false;Frame();}else WaitMessage();
+ }
+ ThumbStop();GfxDestroy();return 0;
+}
+#include "language-startup.inc"
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
  RoInitialize(RO_INIT_SINGLETHREADED);
  bool ole=SUCCEEDED(OleInitialize(nullptr)); // needed for DoDragDrop, on top of the WinRT apartment above
+ {
+  int count=0;auto args=CommandLineToArgvW(GetCommandLineW(),&count);
+  if(count>=4&&!wcscmp(args[1],L"--language-onboarding-test")){
+   std::wstring key=args[2];int saved=-1;
+   bool allowed=key.starts_with(L"Software\\VetroLook\\OnboardingTests\\");
+   bool existing=allowed&&LanguageOnboarding::Load(key,saved);
+   if(existing)language=saved;
+   bool ok=allowed&&(existing||LanguageOnboarding::Ask(instance,false,key));
+   std::wofstream out{fs::path(args[3])};out<<L"success="<<ok<<L"\nlanguage="<<language<<L"\nprompt_shown="<<(!existing)<<L"\n";
+   LocalFree(args);if(ole)OleUninitialize();RoUninitialize();return ok?0:5;
+  }
+  if(count>=4&&!wcscmp(args[1],L"--gallery-review-preview")){
+   int code=RunGalleryReviewPreview(instance,args[2],args[3]);LocalFree(args);if(ole)OleUninitialize();RoUninitialize();return code;
+  }
+  if(count>=7&&!wcscmp(args[1],L"--smart-e2e")){
+   int code=RunSmartIntegration(args[2],args[3],args[4],args[5],args[6]);LocalFree(args);if(ole)OleUninitialize();RoUninitialize();return code;
+  }
+  if(count>=5&&!wcscmp(args[1],L"--smart-probe")){
+   auto image=DecodeScreen(args[4],224,{});std::wstring report;
+   bool gpu=count>5&&!wcscmp(args[5],L"gpu");unsigned iterations=count>6?(std::max)(1,_wtoi(args[6])):20;
+   bool ok=SmartBenchmarkModel(args[3],image,report,gpu,iterations);
+   std::wofstream out{fs::path(args[2])};out<<report;LocalFree(args);if(ole)OleUninitialize();RoUninitialize();return ok?0:1;
+  }LocalFree(args);
+ }
  DWORD stored=0,size=sizeof(stored);
  LONG themeRead=RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",RRF_RT_REG_DWORD,nullptr,&stored,&size);
  bool light=false;
@@ -6388,8 +6751,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
   RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LightTheme",REG_DWORD,&initial,sizeof(initial));
  }
  stored=0;size=sizeof(stored);
- RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Language",RRF_RT_REG_DWORD,nullptr,&stored,&size);
- language=int(stored)?1:0;
+ bool languageChosen=LanguageOnboarding::Load(LanguageOnboarding::SettingsKey,language);
+ if(!languageChosen)language=1; // The first question is always in English.
  stored=0;size=sizeof(stored);
  RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"WheelMode",RRF_RT_REG_DWORD,nullptr,&stored,&size);
  wheelMode=int(stored)?1:0;wheelMix.Reset(float(wheelMode));
@@ -6429,7 +6792,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  stored=DWORD(DefaultLibView);size=sizeof(stored);
  if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LibraryView",RRF_RT_REG_DWORD,nullptr,&stored,&size)!=ERROR_SUCCESS)
   stored=DWORD(DefaultLibView);
- libView=(stored==DWORD(ViewFolders))?ViewFolders:ViewPhotosFlat;
+ libView=ViewPhotosFlat; // Recent is the default navigation destination.
  libViewSlide.Reset(libView==ViewPhotosFlat?1.f:0.f);
  BOOL animations=TRUE;
  SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
@@ -6492,13 +6855,16 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
   PostMessageW(existing,ActivateNormal,0,0);
   LocalFree(argv);return 0;
  }
+ if(!testing&&!languageChosen&&!LanguageOnboarding::Ask(instance,light)){
+  LocalFree(argv);if(ole)OleUninitialize();RoUninitialize();return 5;
+ }
  WNDCLASSW wc{};
  wc.lpfnWndProc=Proc;wc.hInstance=instance;wc.lpszClassName=L"VetroLook.Window";
 #ifdef VETRO_REVIEW_BUILD
  wc.lpszClassName=L"VetroLook.Review.Window";
 #endif
  wc.style=CS_DBLCLKS;wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
- wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));
+ wc.hIcon=ThemedAppIcon();
  if(!wc.hIcon)wc.hIcon=LoadIcon(nullptr,IDI_APPLICATION);
  RegisterClassW(&wc);
  win=CreateWindowExW(WS_EX_APPWINDOW|WS_EX_NOREDIRECTIONBITMAP,wc.lpszClassName,L"Vetro Look",
@@ -6521,7 +6887,16 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  SetTimer(win,9,250,nullptr);
  ApplyCorners();
  if(!GfxCreate(win,dpi))return 2;
- DragAcceptFiles(win,TRUE);
+ BrowserStart(win,BrowserReady);
+ RegisterFileDrop(win,{SpringFolderHover,StopSpringFolders,[](const std::vector<std::wstring>& paths,POINT pt){
+  auto target=BrowserFolderAt(pt.x/dpi,pt.y/dpi);
+  if(!target.empty()){bool ok=CopyDroppedFiles(win,paths,target);if(ok){IndexTouchFolder(target);RefreshAlbum();}return ok;}
+  if(!paths.empty()){
+   DWORD attributes=GetFileAttributesW(paths.front().c_str());
+   if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)){NavigateFolder(paths.front());return true;}
+   if(KindFromExtension(paths.front())!=MediaKind::Unsupported){OpenExternal(paths.front());return true;}
+  }return false;
+ }});
  // What this machine is, before anything asks it to do work. The probe needs the
  // Direct3D device, so it waits for the renderer; everything after it -- the
  // pacing plan, the memory budgets, the Governor -- reads its answer instead of
@@ -6543,7 +6918,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  ThumbStart(win,ThumbReady);
  // Video Mode's expand control drives the window the shell already animates,
  // rather than reaching for the window itself.
- VideoModeSetExpandHandler([]{AnimateWindow(!WindowMaximized());},[]{return WindowMaximized();});
+ VideoModeSetExpandHandler([]{
+  if(pictureInPicture)TogglePictureInPicture();
+  else AnimateWindow(!WindowMaximized());
+ },[]{return !pictureInPicture&&WindowMaximized();});
  VideoModeSetPipHandler([]{TogglePictureInPicture();},[]{return pictureInPicture;});
  // The system's own media controls. Attached to this window, which is what
  // makes the keyboard's play key reach this application rather than another.
@@ -6553,7 +6931,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  // host or which codec it was (Appendix G).
  if(testing||GetEnvironmentVariableW(L"VETRO_DEBUG",nullptr,0))
   PlaybackSetLogSink([](const std::wstring& line){Log(line);});
- if(!testing&&!quickCLI)IndexStart(win,IndexFolders,IndexProgress);
+ smartSettings=SmartPreferences();
+ if(!testing&&!quickCLI){SmartStart(win,SmartReady);IndexStart(win,IndexFolders,IndexProgress);}
  SetTimer(win,3,350,nullptr);
  NOTIFYICONDATAW tray{sizeof(tray)};
  tray.hWnd=win;tray.uID=1;tray.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;
@@ -6637,6 +7016,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  cv.notify_one();
  if(worker.joinable())worker.join();
  if(actionWorker.joinable())actionWorker.join();
+ RevokeFileDrop(win);StopSmartInventory();BrowserStop();StopAlbumWorker();SmartStop();
  if(!testing&&!quickCLI)IndexStop();
  MetaStop();ThumbStop();ShutdownSharing();
  FavouritesFlush();MetaCacheFlush();

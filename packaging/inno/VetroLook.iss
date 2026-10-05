@@ -17,6 +17,15 @@
 #ifndef MyMpvPath
 #define MyMpvPath "..\..\dist\libmpv-2.dll"
 #endif
+#ifndef MyModelsPath
+#define MyModelsPath "..\..\dist\models"
+#endif
+#ifndef MyLicensePath
+#define MyLicensePath "..\..\VetroView\LICENSE"
+#endif
+#ifndef MyOutDir
+#define MyOutDir "..\..\release"
+#endif
 #define MyAppPublisher "VetroLook"
 #define MyAppURL "https://github.com/Phnem/VetroLook"
 
@@ -33,14 +42,14 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=..\..\release
+OutputDir={#MyOutDir}
 OutputBaseFilename=VetroLook-{#MyAppVersion}-Setup
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\VetroLook.exe
-LicenseFile=..\..\VetroView\LICENSE
+LicenseFile={#MyLicensePath}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -52,6 +61,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#MyExePath}"; DestDir: "{app}"; Flags: ignoreversion
 ; The playback engine, loaded by name from beside the executable.
 Source: "{#MyMpvPath}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyModelsPath}\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyLensDbPath}\*"; DestDir: "{app}\lensfun-db"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyReadmePath}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyNoticesPath}"; DestDir: "{app}"; Flags: ignoreversion

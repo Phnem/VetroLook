@@ -70,6 +70,26 @@ std::shared_ptr<Image> Downsample(const std::shared_ptr<Image>& src,unsigned edg
  return out;
 }
 
+std::shared_ptr<Image> SampleBackdrop(const Image& src,unsigned edge){
+ if(!src.w||!src.h||!edge)return {};
+ auto out=std::make_shared<Image>();
+ float scale=float(edge)/float((std::max)(src.w,src.h));
+ out->w=(std::max)(1u,unsigned(src.w*scale));out->h=(std::max)(1u,unsigned(src.h*scale));
+ out->pixels.resize(size_t(out->w)*out->h*4);out->hasAlpha=src.hasAlpha;
+ // Sixteen stratified samples per output pixel preserve colour placement
+ // without a full-resolution reduction in the presentation thread.
+ for(unsigned y=0;y<out->h;++y)for(unsigned x=0;x<out->w;++x){
+  unsigned sums[4]={};
+  for(unsigned sy=0;sy<4;++sy)for(unsigned sx=0;sx<4;++sx){
+   unsigned px=(std::min)(src.w-1,unsigned((x+(sx+.5f)/4)*src.w/out->w));
+   unsigned py=(std::min)(src.h-1,unsigned((y+(sy+.5f)/4)*src.h/out->h));
+   auto p=&src.pixels[(size_t(py)*src.w+px)*4];
+   for(int c=0;c<4;++c)sums[c]+=p[c];
+  }
+  for(int c=0;c<4;++c)out->pixels[(size_t(y)*out->w+x)*4+c]=uint8_t(sums[c]/16);
+ }
+ return out;
+}
 bool AverageColour(const Image& src,uint8_t rgba[4]){
  if(!src.w||!src.h||src.pixels.empty())return false;
  // At most ~64x64 samples: the backdrop is a blurred wash, and walking a

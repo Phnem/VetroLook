@@ -40,17 +40,18 @@ VetroLook aims to combine:
 
 without requiring you to import your collection into a proprietary database or upload anything to the cloud.
 
-## v1.1 highlights
+## 2.4.0 highlights
 
-Version 1.1 focuses on the path between selecting a file and seeing a stable
-image. JPEG, PNG, TIFF and static WebP now choose a screen-sized decode or
-scale path where their decoders support it; PSD/PSB screen viewing streams
-rows instead of materialising a full-size BGRA image. RAW embedded previews
-are ranked by useful dimensions before decode. The app keeps the trusted AVIF
-decode path where the platform decoder does not match it closely enough.
+- **English / Русский:** a mandatory first-run question asks you to choose a language in English. It cannot be dismissed until you choose; the preference is saved and can be changed later in the menu.
+- **Tokyo Glass:** warm cream, charcoal and red accents, bold typography, rounded controls and live frosted glass across the gallery, viewer and built-in **VetroVideo**.
+- **Folder navigation:** a glass sidebar for Recent, Favorites, pinned folders and system locations; a compact path stack replaces a deep expanded tree.
+- **Scoped search and drag-and-drop:** search the current folder, its subfolders or all indexed locations. Hover a dragged file over a folder for about 500 ms to open it.
+- **Local Smart Gallery:** a bundled six-class model labels the gallery in the background. A progress popup can collapse into a bottom-right toast; results are applied only after your confirmation.
+- **Safe corrections:** Later keeps labels for the next launch, Show all reveals filtered items, and manual Show/Hide choices persist. Files on disk are never deleted by smart filtering.
 
-The shipped MSI, Inno Setup installer, MSIX, and portable ZIP now all carry
-the Lensfun profile database and the runtime notices required by the viewer.
+[Download 2.4.0](https://github.com/Phnem/VetroLook/releases/tag/v2.4.0) · [Changelog](CHANGELOG.md)
+
+The bundled classifier has a known validation limitation: its 95% upper bound for hiding a real photo is 0.15061%, above the original 0.1% target. It is included with publisher acceptance; uncertain images remain visible. See the [model card](models/MODEL_CARD.md).
 
 ---
 
@@ -124,6 +125,20 @@ VetroLook can build a photo library directly from the images already present on 
 
 On first launch VetroLook indexes supported images and groups them by their real filesystem locations. Afterwards the library is maintained incrementally instead of repeatedly crawling every directory: a background watcher picks up changes while the app runs, and a cheap re-check at startup catches anything that happened while it was closed.
 
+### Files sidebar
+
+Open the menu beside VETRO LOOK to browse Recent, Favorites, pinned folders and system locations with their own icons. Right-click a folder to pin/unpin it or move it to the Recycle Bin. Navigation follows a compact stack such as Pictures → 2026 → Japan → Tokyo.
+
+Choose Current folder, Subfolders or Everywhere beside search. Drag a file over a folder for about 500 ms to enter it without releasing the drag; dropping copies the file through Windows Shell.
+
+### First Smart Gallery review
+
+On an unreviewed gallery, a glass popup shows the number processed, a percentage and approximate time remaining. The initial estimate uses 0.5 seconds per file, then adapts to measured processing time. **GOT IT** turns the popup into a toast at the bottom right.
+
+Classification does not remove items during this first pass. When it finishes, the toast expands and asks whether to apply the results. **Yes, apply** fades the gallery into its filtered state and enables automatic application for newly added files. **Later** keeps the labels without applying them and asks again next launch.
+
+The filter recognizes photos, screenshots, documents, icons/UI assets, artwork and other media. Uncertain or unreadable items stay visible. Use Show all or the image context menu to correct a decision; corrections survive restarts and model changes. Classification is local, uses existing thumbnails and never modifies source images.
+
 ### NTFS indexing architecture
 
 ```text
@@ -190,7 +205,7 @@ A family can be split back into its separate folders per-folder, and the choice 
 
 ## Photos View
 
-Folders are only one way to browse a photo collection. Switch to Photos View to ignore folder boundaries and browse every indexed photo as one flat, virtualized grid — searchable, sortable and filterable the same way as the folder view. Grouping that grid by capture date into a day-by-day timeline (Today / Yesterday / by month) is planned but not built yet.
+Folders are only one way to browse a photo collection. Switch to Photos View to ignore folder boundaries and browse every indexed photo as one flat, virtualized grid — searchable, sortable and filterable the same way as the folder view. The grid groups images into a date timeline with localized Today and Yesterday headings.
 
 ## Photo Stacks
 
@@ -330,6 +345,11 @@ VetroLook is under active development.
 
 **Implemented**
 
+- English/Russian interface with mandatory first-run language choice
+- Local six-class Smart Gallery with staged application and persistent corrections
+- Recent, Favorites, pinned folders, compact path navigation and scoped search
+- Date-based timeline for Photos View
+- Built-in VetroVideo playback, subtitles and picture-in-picture
 - Native image viewer with the format set listed above
 - Zoom / pan, Fit / 1:1
 - Floating viewer controls with idle auto-hide
@@ -349,7 +369,6 @@ VetroLook is under active development.
 **In progress**
 
 - Disk-persistent thumbnail cache (currently in-memory only)
-- Date-based timeline for Photos View
 - Event and burst detection
 - Similar/near-duplicate photo detection
 - Broader Folder-Family signals beyond generic sibling names
@@ -368,19 +387,15 @@ Windows SDK
 Git
 ```
 
-Clone and configure:
+Clone and build from PowerShell:
 
-```bash
+```powershell
 git clone https://github.com/Phnem/VetroLook.git
 cd VetroLook
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+.\build.ps1
 ```
 
-Build:
-
-```bash
-cmake --build build --config Release --target VetroLook
-```
+The script prepares NASM, dav1d and the pinned playback library before configuring CMake and building the Release target. The bundled Smart Gallery payload is copied from `models/`; source builds and release packages use the same model and policy.
 
 The resulting `VetroLook.exe` is written to `dist/`. Build commands may change while the project is under active development — check `CMakeLists.txt` for the current target names.
 

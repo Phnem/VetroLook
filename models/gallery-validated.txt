@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "quality_gate_passed": false,
+  "model_sha256": "db197e99c866970811f7c4da597b31d32345f92ce1d45252d85f1fb3558bdfa5",
+  "policy_sha256": "5dbd2f1410b8c8645a5bd49f86933607a122121b1afbe6447235dc40edf7de81",
+  "evaluation_sha256": "5a3084a564dd1dbb58564812c3b44e95f003d8f3e6152b919628692ef75ab678",
+  "approval_basis": "explicit_user_risk_acceptance"
+}

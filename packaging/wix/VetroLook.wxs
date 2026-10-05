@@ -46,6 +46,7 @@
       </Component>
       <Directory Id="LensfunDbFolder" Name="lensfun-db">
       </Directory>
+      <Directory Id="GalleryModelsFolder" Name="models" />
 
       <!--
         File-association registration: purely declarative, HKLM (native 64-bit view, this
@@ -175,6 +176,7 @@
     <Feature Id="MainFeature" Title="VetroLook" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="LensfunDatabase" />
+      <ComponentRef Id="GalleryModels" />
       <ComponentRef Id="FileAssociationRegistry" />
       <ComponentRef Id="MediaAssociations" />
       <ComponentRef Id="ApplicationShortcut" />
@@ -182,4 +184,5 @@
   </Package>
   <?include VetroLook.lensfun.wxi?>
   <?include VetroLook.media.wxi?>
+  <?include VetroLook.models.wxi?>
 </Wix>

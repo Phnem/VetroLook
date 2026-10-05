@@ -2,15 +2,21 @@
 // Application icon, embedded into the executable so the same artwork shows
 // up on the .exe itself, in the taskbar/tray, and — via DefaultIcon pointing
 // at this exe — on any file type Vetro Look is registered to open.
+// Two variants, like Vetro Collection's launcher icon: 1 is the dark tile (the
+// default: the .exe and file types show the lowest id) and 2 the light one, which
+// the window and tray swap to while Windows runs a light theme. Sources and the
+// generator live in icons/source.
 #include <winver.h>
 #define IDI_APP_ICON 1
+#define IDI_APP_ICON_LIGHT 2
 IDI_APP_ICON ICON "app.ico"
+IDI_APP_ICON_LIGHT ICON "app-light.ico"
 
 // The version Windows shows in the file's Properties and in Installed apps.
 // Kept in step with project(... VERSION) in CMakeLists.txt.
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,2,0,0
- PRODUCTVERSION 2,2,0,0
+ FILEVERSION 2,4,0,0
+ PRODUCTVERSION 2,4,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0
  FILEOS VOS_NT_WINDOWS32
@@ -23,12 +29,12 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "VetroLook"
    VALUE "FileDescription", "Vetro Look"
-   VALUE "FileVersion", "2.2"
+   VALUE "FileVersion", "2.4.0"
    VALUE "InternalName", "VetroLook"
    VALUE "LegalCopyright", "GPL-3.0-or-later"
    VALUE "OriginalFilename", "VetroLook.exe"
    VALUE "ProductName", "Vetro Look"
-   VALUE "ProductVersion", "2.2"
+   VALUE "ProductVersion", "2.4.0"
   END
  END
  BLOCK "VarFileInfo"

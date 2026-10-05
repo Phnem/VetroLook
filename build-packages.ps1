@@ -27,17 +27,20 @@ param(
     [string]$Version,
     [switch]$LocalTestSign,
     [switch]$SkipPortable,
-    [switch]$SkipMsix
+    [switch]$SkipMsix,
+    [string]$ApplicationDir,
+    [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
 $RepoRoot = $PSScriptRoot
-$DistDir = Join-Path $RepoRoot 'dist'
+$SourceDir = if (Test-Path (Join-Path $RepoRoot 'VetroView/CMakeLists.txt')) { Join-Path $RepoRoot 'VetroView' } else { $RepoRoot }
+$DistDir = if ($ApplicationDir) { [System.IO.Path]::GetFullPath($ApplicationDir) } else { Join-Path $RepoRoot 'dist' }
 $ExePath = Join-Path $DistDir 'VetroLook.exe'
-$ReleaseDir = Join-Path $RepoRoot 'release'
+$ReleaseDir = if ($OutDir) { [System.IO.Path]::GetFullPath($OutDir) } else { Join-Path $RepoRoot 'release' }
 $PackagingDir = Join-Path $RepoRoot 'packaging'
 
 if (-not $Version) {
-    $cmakeText = Get-Content (Join-Path $RepoRoot 'VetroView\CMakeLists.txt') -Raw
+    $cmakeText = Get-Content (Join-Path $SourceDir 'CMakeLists.txt') -Raw
     if ($cmakeText -match 'project\(VetroLook VERSION ([\d\.]+)') { $Version = $Matches[1] } else { $Version = '1.0.0' }
 }
 
@@ -45,7 +48,8 @@ Write-Host "VetroLook release packaging -- version $Version"
 
 if (-not $SkipAppBuild) {
     Write-Host 'Building VetroLook.exe (CMake/MSVC)...'
-    & (Join-Path $RepoRoot 'VetroView\build.ps1')
+    if ($ApplicationDir) { throw '-ApplicationDir requires -SkipAppBuild; build that directory explicitly first.' }
+    & (Join-Path $SourceDir 'build.ps1')
     if ($LASTEXITCODE) { throw 'Application build failed' }
 }
 
@@ -55,7 +59,7 @@ if (-not (Test-Path $ExePath)) {
 
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
-Copy-Item (Join-Path $RepoRoot 'VetroView\LICENSE') (Join-Path $ReleaseDir 'LICENSE') -Force
+Copy-Item (Join-Path $SourceDir 'LICENSE') (Join-Path $ReleaseDir 'LICENSE') -Force
 Copy-Item (Join-Path $DistDir 'THIRD_PARTY_NOTICES.txt') (Join-Path $ReleaseDir 'THIRD_PARTY_NOTICES.txt') -Force
 
 $targets = @(
@@ -103,6 +107,10 @@ if (-not $SkipPortable) {
     if (Test-Path $stagePortable) { Remove-Item $stagePortable -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stagePortable | Out-Null
     Copy-Item $ExePath (Join-Path $stagePortable 'VetroLook.exe') -Force
+    $models = Join-Path $DistDir 'models'
+    if (-not (Test-Path $models)) { throw 'Smart Gallery models are missing from the release payload.' }
+    Copy-Item $models (Join-Path $stagePortable 'models') -Recurse -Force
+    Copy-Item (Join-Path $SourceDir 'LICENSE') (Join-Path $stagePortable 'LICENSE') -Force
     # The playback engine is loaded by name from beside the executable; without
     # it a portable copy is an image viewer only.
     $mpv = Join-Path $DistDir 'libmpv-2.dll'

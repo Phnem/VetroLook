@@ -175,11 +175,11 @@ public:
    {"gpu-context","d3d11"},
    {"d3d11-output-mode","composition"},
    {"d3d11-composition-size","1280x720"},
-   // The shell can be resized to a movie's aspect once facts arrive, but a
-   // composition output has no window manager hint to enforce that instantly.
-   // Panscan is the visual safety net: it keeps the film aspect correct and
-   // crops only the surplus edge instead of ever painting black letterbox bars.
-   {"panscan","1.0"},
+   // Keep the entire film. gpu-next fills any surrounding space with a
+   // softened reflection of this same frame, in the existing GPU renderer.
+   {"panscan","0.0"},
+   {"border-background","blur"},
+   {"background-blur-radius","32"},
    // The decode ladder is the engine's own: auto-safe tries the hardware paths
    // that are known good on this machine and falls back to software rather than
    // failing. Which rung it landed on is reported in the snapshot.

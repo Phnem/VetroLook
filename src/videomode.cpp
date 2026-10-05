@@ -1,6 +1,7 @@
-// Vetro Look, GPL-3.0-or-later.
+﻿// Vetro Look, GPL-3.0-or-later.
 // Video Mode. See videomode.h.
 #include "videomode.h"
+#include "pipeline.h"
 #include "preview.h"
 #include "subtitles.h"
 #include "mediastate.h"
@@ -41,7 +42,7 @@ std::wstring surfacePath;
 MediaRoute surfaceRoute;
 MediaFacts surfaceFacts;
 std::shared_ptr<Image> surfacePoster;
-ComPtr<ID2D1Bitmap> posterTexture;
+ComPtr<ID2D1Bitmap> posterTexture,posterBackdropTexture;
 uint64_t surfaceGeneration=0;
 
 // The engine, and what the shell has been told about it.
@@ -348,7 +349,7 @@ void VideoModeEnter(const std::wstring& path,const MediaRoute& route,uint64_t ge
   state.signature=signature;
  }
  surfaceFacts=MediaFacts{};
- surfacePoster.reset();posterTexture.Reset();
+ surfacePoster.reset();posterTexture.Reset();posterBackdropTexture.Reset();
  snapshot=PlaybackSnapshot{};
  scrubbing=volumeDragging=false;
  hovered=pressed=CtrlNone;hitCount=0;
@@ -399,7 +400,7 @@ bool VideoModeCollect(uint64_t generation){
  if(result.generation!=generation||result.generation!=surfaceGeneration)return false;
  surfaceFacts=result.facts;
  if(result.route.kind!=MediaKind::Unsupported)surfaceRoute=result.route;
- if(result.poster){surfacePoster=result.poster;posterTexture.Reset();}
+ if(result.poster){surfacePoster=result.poster;posterTexture.Reset();posterBackdropTexture.Reset();}
  return true;
 }
 
@@ -412,7 +413,7 @@ void VideoModeLeave(){
  surfaceRoute=MediaRoute{};
  surfaceFacts=MediaFacts{};
  surfacePoster.reset();
- posterTexture.Reset();
+ posterTexture.Reset();posterBackdropTexture.Reset();
  surfaceGeneration=0;
  scrubbing=volumeDragging=false;
  hovered=pressed=CtrlNone;hitCount=0;
@@ -426,7 +427,7 @@ void VideoModeLeave(){
  hasPending=false;hasFinished=false;
 }
 
-void VideoModeReleaseTextures(){posterTexture.Reset();previewTexture.Reset();previewTextureOf=nullptr;}
+void VideoModeReleaseTextures(){posterTexture.Reset();posterBackdropTexture.Reset();previewTexture.Reset();previewTextureOf=nullptr;}
 
 void VideoModeStop(){
  PreviewStop();
@@ -1046,6 +1047,7 @@ namespace{
 // palette is fixed rather than themed: the backdrop is the picture, not the
 // window, so light and dark chrome would both be read against the same thing.
 constexpr float PanelRadius=34.f,PanelHeight=126.f,PanelMargin=22.f;
+constexpr float PipPanelRadius=22.f,PipPanelHeight=62.f,PipPanelMargin=12.f;
 constexpr float BlurRadius=22.f;                  // device pixels, Gaussian sigma
 D2D1_COLOR_F White(float a){return D2D1::ColorF(1,1,1,a);}
 
@@ -1456,11 +1458,17 @@ void VideoModePaint(D2D1_RECT_F viewport,const Palette& palette,D2D1_COLOR_F bas
  target->FillRectangle(viewport,Ink());
  if(!surfacePoster||!surfacePoster->w||!surfacePoster->h)return;
  if(!posterTexture){
+  if(auto wash=SampleBackdrop(*surfacePoster))target->CreateBitmap(D2D1::SizeU(wash->w,wash->h),wash->pixels.data(),wash->w*4,
+   D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&posterBackdropTexture);
   target->CreateBitmap(D2D1::SizeU(surfacePoster->w,surfacePoster->h),surfacePoster->pixels.data(),
    surfacePoster->w*4,
    D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),
    &posterTexture);
   if(!posterTexture)return;
+ }
+ if(posterBackdropTexture){
+  target->DrawBitmap(posterBackdropTexture.Get(),viewport,.75f*alpha,D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,nullptr);
+  Ink()->SetColor(D2D1::ColorF(.02f,.03f,.05f,.26f*alpha));target->FillRectangle(viewport,Ink());
  }
  auto frame=FitPoster(viewport);
  SoftShadow(D2D1::RoundedRect(frame,6,6),.5f*alpha,1.2f);
@@ -1516,7 +1524,9 @@ void VideoModePaintOverlay(D2D1_RECT_F viewport,const Palette& palette,float alp
  barRect=VideoModeControlPanel(viewport);
  popupHits.clear();
  float cx=(barRect.left+barRect.right)/2;
- auto shape=D2D1::RoundedRect(barRect,PanelRadius,PanelRadius);
+ bool compactPip=pipState&&pipState();
+ float panelRadius=compactPip?PipPanelRadius:PanelRadius;
+ auto shape=D2D1::RoundedRect(barRect,panelRadius,panelRadius);
 
  // --------------------------------------------------------------- glass ----
  // The compositor has already frosted the film under this panel; what is drawn
@@ -1532,6 +1542,32 @@ void VideoModePaintOverlay(D2D1_RECT_F viewport,const Palette& palette,float alp
  target->SetTransform(D2D1::Matrix3x2F::Scale(collapse,collapse,D2D1::Point2F(cx,barRect.bottom))*Mat(beforeCollapse));
  SoftShadow(shape,.25f*alpha,1.35f);
  FrostedSurface(shape,alpha);
+
+ // PiP is a glanceable surface, not the full player squeezed into 420 pixels.
+ // Keep one compact row, always expose the PiP toggle as the way home, and
+ // leave the film unobstructed once the shell's shorter inactivity timer fades
+ // this strip. The ordinary expand action is deliberately absent here: it used
+ // to maximise the HWND while leaving pictureInPicture=true, which stranded the
+ // viewer in a full-screen window with PiP chrome and no route back.
+ if(compactPip){
+  float rowY=(barRect.top+barRect.bottom)/2;
+  float playSize=46.f,skipSize=36.f,exitSize=36.f;
+  auto centred=[&](float centreX,float size){
+   return D2D1::RectF(centreX-size/2,rowY-size/2,centreX+size/2,rowY+size/2);
+  };
+  float clusterCx=cx-22.f;
+  auto play=centred(clusterCx,playSize);
+  auto back=centred(clusterCx-52.f,skipSize);
+  auto forward=centred(clusterCx+52.f,skipSize);
+  auto exitPip=centred(barRect.right-18.f-exitSize/2,exitSize);
+  Add(CtrlPlay,play);Add(CtrlBack,back);Add(CtrlForward,forward);Add(CtrlPip,exitPip);
+  RoundButton(CtrlPlay,play,snapshot.paused?PhPlay:PhPause,13.f,0.f,alpha,true);
+  RoundButton(CtrlBack,back,PhBack,8.f,0.f,alpha,true);
+  RoundButton(CtrlForward,forward,PhForward,8.f,0.f,alpha,true);
+  RoundButton(CtrlPip,exitPip,PhPip,8.f,.08f,alpha,true);
+  target->SetTransform(beforeCollapse);
+  return;
+ }
 
  // ------------------------------------------------------------ first row ---
  float rowY=barRect.top+40.f;                 // centre line of the control row
@@ -1603,7 +1639,7 @@ float VideoModeSubtitleOpacity(){
 D2D1_RECT_F VideoModeControlGlass(D2D1_RECT_F viewport,float alpha,float& radius){
  auto rest=VideoModeControlPanel(viewport);
  float scale=TransportScale(alpha);
- radius=PanelRadius*scale;
+ radius=(pipState&&pipState()?PipPanelRadius:PanelRadius)*scale;
  if(rest.right<=rest.left)return rest;
  float cx=(rest.left+rest.right)/2;
  return D2D1::RectF(cx+(rest.left-cx)*scale,rest.bottom+(rest.top-rest.bottom)*scale,
@@ -1615,14 +1651,19 @@ D2D1_RECT_F VideoModeControlGlass(D2D1_RECT_F viewport,float alpha,float& radius
 // the painter uses, in one place.
 D2D1_RECT_F VideoModeControlPanel(D2D1_RECT_F viewport){
  if(!snapshot.opened||snapshot.duration<=0)return D2D1::RectF(0,0,0,0);
- float available=viewport.right-viewport.left-2*PanelMargin;
+ bool compactPip=pipState&&pipState();
+ float margin=compactPip?PipPanelMargin:PanelMargin;
+ float height=compactPip?PipPanelHeight:PanelHeight;
+ float available=viewport.right-viewport.left-2*margin;
  // A fixed 440-DIP minimum became a near edge-to-edge slab on high DPI
  // displays. The dock now follows the available surface and only bottoms out
  // at the space needed for its transport cluster.
- float width=(std::min)(820.f,(std::max)(320.f,available*.56f));
+ float width=compactPip
+  ?(std::min)(300.f,(std::max)(236.f,available*.78f))
+  :(std::min)(820.f,(std::max)(320.f,available*.56f));
  if(width>available)width=available;
  float cx=(viewport.left+viewport.right)/2;
- return D2D1::RectF(cx-width/2,viewport.bottom-PanelHeight-PanelMargin,cx+width/2,viewport.bottom-PanelMargin);
+ return D2D1::RectF(cx-width/2,viewport.bottom-height-margin,cx+width/2,viewport.bottom-margin);
 }
 D2D1_RECT_F VideoModePopupPanel(D2D1_RECT_F viewport){return PopupRect(viewport);}
 float VideoModePopupOpacity(){return float(Clamp01(popupReveal.v));}
@@ -1685,6 +1726,13 @@ void VideoModeSetExpandHandler(void(*toggle)(),bool(*expanded)()){
 }
 void VideoModeSetPipHandler(void(*toggle)(),bool(*active)()){
  pipToggle=toggle;pipState=active;
+}
+void VideoModeDismissTransientUi(){
+ ClosePopup();
+ closingPopup=PopupNone;popupReveal.Reset(0.f);popupHits.clear();popupHovered=-1;
+ previewWanted=false;previewReveal.Reset(0.f);previewFrame.reset();previewTextureOf=nullptr;
+ previewRect=D2D1::RectF(0,0,0,0);
+ hovered=pressed=CtrlNone;scrubbing=false;volumeDragging=false;
 }
 
 const MediaFacts& VideoModeFacts(){return surfaceFacts;}

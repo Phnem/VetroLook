@@ -26,7 +26,7 @@ struct Entry{
  State state=Queued;
  std::shared_ptr<Image> image;
  unsigned attempts=0;
- ULONGLONG retryAt=0,checked=0;
+ ULONGLONG retryAt=0,checked=0,used=0;
  uint64_t size=0,written=0;
 };
 std::mutex mx;std::condition_variable cv;
@@ -103,6 +103,7 @@ std::shared_ptr<Image> ViaWic(const std::wstring& path){
  auto image=std::make_shared<Image>();
  image->w=fw;image->h=fh;image->pixels.resize(size_t(fw)*fh*4);
  if(FAILED(converter->CopyPixels(nullptr,fw*4,UINT(image->pixels.size()),image->pixels.data())))return {};
+ for(size_t i=3;i<image->pixels.size();i+=4)if(image->pixels[i]<255){image->hasAlpha=true;break;}
  return image;
 }
 std::shared_ptr<Image> Shrink(const std::shared_ptr<Image>& src){
@@ -129,7 +130,7 @@ std::shared_ptr<Image> Load(const std::wstring& path){
 void Run(){
  CoInitializeEx(nullptr,COINIT_MULTITHREADED);
  while(true){
-  std::wstring path;
+  std::wstring path;std::shared_ptr<Image> cached;uint64_t previousSize=0,previousWritten=0;
   {
    std::unique_lock lock(mx);
    cv.wait(lock,[]{return stopping||!queue.empty();});
@@ -137,10 +138,11 @@ void Run(){
    path=std::move(queue.back());queue.pop_back();
    auto it=entries.find(path);
    if(it==entries.end()||it->second.state!=Queued)continue;
-   it->second.state=Loading;
+   it->second.state=Loading;cached=it->second.image;previousSize=it->second.size;previousWritten=it->second.written;
   }
-  auto thumb=Load(path);
-  uint64_t size=0,written=0;Stamp(path,size,written);
+  uint64_t size=0,written=0;bool stamped=Stamp(path,size,written);
+  bool unchanged=cached&&stamped&&size==previousSize&&written==previousWritten;
+  auto thumb=unchanged?cached:Load(path);
   {
    std::lock_guard lock(mx);
    auto it=entries.find(path);
@@ -150,7 +152,18 @@ void Run(){
    if(thumb){entry.state=Ready;entry.image=thumb;entry.attempts=0;entry.size=size;entry.written=written;}
    else{entry.state=Failed;entry.attempts++;entry.retryAt=entry.checked+RetryDelay*entry.attempts;}
   }
-  if(thumb&&notifyWindow)PostMessageW(notifyWindow,notifyMessage,0,0);
+  if(!unchanged&&thumb&&notifyWindow)PostMessageW(notifyWindow,notifyMessage,0,0);
+  {
+   std::lock_guard lock(mx);
+   // Bound decoded tiles independently of collection size. Recently visible
+   // entries remain hot; dropping one never drops its independent GPU tile.
+   while(entries.size()>1024){
+    auto oldest=entries.end();
+    for(auto it=entries.begin();it!=entries.end();++it)if((it->second.state==Ready||it->second.state==Failed)&&
+       (oldest==entries.end()||it->second.used<oldest->second.used))oldest=it;
+    if(oldest==entries.end())break;entries.erase(oldest);
+   }
+  }
  }
  CoUninitialize();
 }
@@ -177,7 +190,7 @@ void ThumbRequest(const std::wstring& path){
   ULONGLONG now=GetTickCount64();
   auto it=entries.find(path);
   if(it!=entries.end()){
-   auto& entry=it->second;
+   auto& entry=it->second;entry.used=now;
    if(entry.state==Queued||entry.state==Loading)return;
    if(entry.state==Failed){
     if(entry.attempts>=MaxAttempts||now<entry.retryAt)return;
@@ -186,9 +199,8 @@ void ThumbRequest(const std::wstring& path){
     // is re-read when the file itself changed -- but at most twice a second,
     // since the filmstrip asks for every visible tile on every frame.
     if(now-entry.checked<Revalidate)return;
-    entry.checked=now;
-    uint64_t size=0,written=0;
-    if(!Stamp(path,size,written)||(size==entry.size&&written==entry.written))return;
+    // Validation runs in the worker too: never hold the cache mutex across
+    // disk I/O from a paint call. The existing tile stays visible meanwhile.
    }
    entry.state=Queued;
   }else entries.emplace(path,Entry{});
@@ -228,7 +240,7 @@ void ThumbPrioritize(const std::wstring& path){
 std::shared_ptr<Image> ThumbLookup(const std::wstring& path){
  std::lock_guard lock(mx);
  auto found=entries.find(path);
- return found==entries.end()?std::shared_ptr<Image>():found->second.image;
+ if(found==entries.end())return {};found->second.used=GetTickCount64();return found->second.image;
 }
 
 #ifdef VETRO_THUMB_TESTS

@@ -47,10 +47,14 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item $ExePath (Join-Path $stageDir 'VetroLook.exe') -Force
 $distDir = Split-Path $ExePath -Parent
 $lensDb = Join-Path $distDir 'lensfun-db'
-foreach ($required in @($lensDb, (Join-Path $distDir 'README.txt'), (Join-Path $distDir 'THIRD_PARTY_NOTICES.txt'))) {
+$models = Join-Path $distDir 'models'
+$mpv = Join-Path $distDir 'libmpv-2.dll'
+foreach ($required in @($lensDb, $models, $mpv, (Join-Path $distDir 'README.txt'), (Join-Path $distDir 'THIRD_PARTY_NOTICES.txt'))) {
     if (-not (Test-Path $required)) { throw "[MSIX] Required runtime payload is missing: $required" }
 }
 Copy-Item $lensDb (Join-Path $stageDir 'lensfun-db') -Recurse -Force
+Copy-Item $models (Join-Path $stageDir 'models') -Recurse -Force
+Copy-Item $mpv (Join-Path $stageDir 'libmpv-2.dll') -Force
 Copy-Item (Join-Path $distDir 'README.txt') (Join-Path $stageDir 'README.txt') -Force
 Copy-Item (Join-Path $distDir 'THIRD_PARTY_NOTICES.txt') (Join-Path $stageDir 'THIRD_PARTY_NOTICES.txt') -Force
 
@@ -59,12 +63,12 @@ Set-Content -Path (Join-Path $stageDir 'AppxManifest.xml') -Value $manifest -Enc
 
 Add-Type -AssemblyName System.Drawing
 
-$iconSource = Join-Path $RepoRoot 'icons\icon256.ico'
-if (-not (Test-Path $iconSource)) { $iconSource = Join-Path $RepoRoot 'icons\icon512.ico' }
+$iconSource = Join-Path $RepoRoot 'icons\vetrolook-dark.ico'
 if (-not (Test-Path $iconSource)) { throw "No source icon found under $RepoRoot\icons" }
 
-function New-PngFromIcon([string]$IconPath, [int]$Size, [string]$OutPath) {
-    $srcIcon = New-Object System.Drawing.Icon($IconPath, (New-Object System.Drawing.Size(256, 256)))
+function New-PngFromIcon([string]$IconPath, [int]$Size, [string]$OutPath, [int]$FrameSize = 256) {
+    # FrameSize picks the matching frame of the .ico (the small ones are drawn with a larger mark).
+    $srcIcon = New-Object System.Drawing.Icon($IconPath, (New-Object System.Drawing.Size($FrameSize, $FrameSize)))
     $srcBmp = $srcIcon.ToBitmap()
     $dstBmp = New-Object System.Drawing.Bitmap $Size, $Size
     $g = [System.Drawing.Graphics]::FromImage($dstBmp)
@@ -78,6 +82,18 @@ function New-PngFromIcon([string]$IconPath, [int]$Size, [string]$OutPath) {
 New-PngFromIcon $iconSource 44 (Join-Path $stageDir 'Assets\Square44x44Logo.png')
 New-PngFromIcon $iconSource 150 (Join-Path $stageDir 'Assets\Square150x150Logo.png')
 New-PngFromIcon $iconSource 50 (Join-Path $stageDir 'Assets\StoreLogo.png')
+
+# Taskbar / Start / Alt-Tab icons follow the Windows theme: Windows takes the "unplated"
+# set on a dark taskbar and the "lightunplated" set on a light one (icons\vetrolook-*.ico,
+# built by icons\source\generate_icons.py). The dark tile is also the default above.
+$iconDark = Join-Path $RepoRoot 'icons\vetrolook-dark.ico'
+$iconLight = Join-Path $RepoRoot 'icons\vetrolook-light.ico'
+foreach ($variant in @(@{ Icon = $iconDark; Form = 'unplated' }, @{ Icon = $iconLight; Form = 'lightunplated' })) {
+    if (-not (Test-Path $variant.Icon)) { throw "Themed icon missing: $($variant.Icon)" }
+    foreach ($px in 16, 24, 32, 48, 256) {
+        New-PngFromIcon $variant.Icon $px (Join-Path $stageDir "Assets\Square44x44Logo.targetsize-${px}_altform-$($variant.Form).png") $px
+    }
+}
 
 $outMsix = Join-Path $OutDir "VetroLook-$Version-x64.msix"
 if (Test-Path $outMsix) { Remove-Item $outMsix -Force }

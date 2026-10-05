@@ -1,6 +1,23 @@
 # Changelog
 
-## 2.2 — 2026-09-14
+## 2.4.0 вЂ” 2026-10-05
+
+Changes since the last published release, 2.2:
+
+- Added a mandatory first-run English/Russian language chooser. The question is in English; close, Alt+F4 and Escape cannot dismiss it before an explicit choice. The saved preference is honored on subsequent starts, including direct-file and background launches.
+- Reworked the gallery and viewer around the Tokyo Glass palette, bold typography and rounded frosted surfaces; retained glass and restored image/video ambient reflection while preserving transparency for cutout images.
+- Added the existing glass sidebar to library navigation: Recent, Favorites, pinned folders, system-location icons and a compact current-path stack.
+- Added folder pin/unpin actions, Recycle Bin deletion, spring-loaded drag navigation and Current folder / Subfolders / Everywhere search scopes.
+- Moved folder reads and searches to background workers and improved gallery initialization and thumbnail handling.
+- Added local six-class Smart Gallery inference with a persistent model-bound cache, Show all/category controls and persistent manual Show/Hide overrides.
+- Staged the first complete gallery review until the user applies it. Added progress, approximate remaining time, popup-to-toast animation, completion confirmation and a smooth gallery fade.
+- Preserved staged labels after Later and offered application again on the next launch. After Yes, newly added files apply automatically.
+- Retried files that change while queued using their latest metadata, and reset application consent when the model identity changes.
+- Bundled the exact model/policy in EXE, MSI, MSIX and portable packaging. Published its validation limitation in the model card; the original scientific gate remains failed and is not presented as a pass.
+- Preserved settings, favorites and gallery corrections in the legacy clean uninstaller.
+- Updated README, release documentation and package scripts to work in both the development workspace and a standalone repository checkout.
+
+## 2.2 вЂ” 2026-09-14
 
 - Rebuilt Video Mode chrome as dense macOS-style frosted matte material: live backdrop blur, restrained vibrancy and contrast, neutral tint, micro-grain, inner highlight, bright hairline and soft shadow.
 - Replaced the transport glyphs with a consistent Phosphor Icons family and removed the ornamental disc around the primary playback action.
@@ -14,7 +31,7 @@
 - Added release-grade MSI, Inno Setup and portable ZIP packaging plus a standalone clean uninstaller for stale legacy installations and shell registrations.
 - Fixed the build pipeline retaining a cached review output directory and silently packaging an older executable.
 
-## 2.1 — 2026-09-13
+## 2.1 вЂ” 2026-09-13
 
 - Added media routing: a file's kind is decided by extension and, where the name is misleading, by its container signature, so a film named `.jpg` opens as a film and a photograph named `.mp4` opens as a photograph.
 - Added Video Mode as a second presentation mode of the same window, with its poster frame and media facts; playback itself arrives with the engine.
@@ -50,12 +67,12 @@
 - Made the playback engine's own warnings reach the session log when debugging, so a stream that will not open can say why.
 - Added links to web pages: a page address is handed to a separate resolver process (yt-dlp, supplied by the user), bounded by a job object, a memory limit and a 45-second timeout, and killed with the viewer. The page's title names the window, and sites that split picture and sound play both.
 - Added live streams: a live HLS or DASH source says LIVE instead of a length, its timeline is the window kept since joining, and End returns to the live edge.
-- Added reconnecting: a stream whose connection drops is reopened with backoff — 1, 2, 4, 8, 16 seconds, then every 30 — at the position it had reached, or at the live edge for a broadcast, and says so while it tries and when it is back.
+- Added reconnecting: a stream whose connection drops is reopened with backoff вЂ” 1, 2, 4, 8, 16 seconds, then every 30 вЂ” at the position it had reached, or at the live edge for a broadcast, and says so while it tries and when it is back.
 - Made a stream that cannot play say why in a sentence: the address is gone, access was refused, the certificate did not verify, the page needs an account, or the source is DRM-protected. The engine's own words stay in Diagnostics.
 - Made DRM-only services recognised by their address, so they get a clear message at once instead of a retry loop.
 - Fixed the session log going silent after its first non-English line.
 - Added AI subtitles, generated on this computer: press A, or choose them in the stream card, and the film's speech is transcribed a few minutes ahead of where you are and shown in the same bubble as ordinary subtitles. Audio never leaves the device.
-- Added a single AI subtitles download in the … menu: the speech runtime, the speech detector and the model (about 1.2 GB together) arrive in one step with a progress bar, each checked against its published checksum, and can be removed again. Nothing AI-related is part of the installers.
+- Added a single AI subtitles download in the вЂ¦ menu: the speech runtime, the speech detector and the model (about 1.2 GB together) arrive in one step with a progress bar, each checked against its published checksum, and can be removed again. Nothing AI-related is part of the installers.
 - Made generated subtitles careful: silent stretches are never sent to the model, and credits it learned from subtitle files, lines it gets stuck repeating and doubtful words over non-speech are dropped.
 - Made transcripts persistent: a film transcribed once opens with its subtitles ready, and a different model or language makes a separate transcript rather than reusing the wrong one.
 - Added Shift+A to save the generated subtitles beside the film as movie.<language>.ai.srt.
@@ -70,7 +87,7 @@
 - Fixed the subtitle bubble going blank when the controls were hidden: subtitles are no longer drawn as part of the controls.
 - Made messages such as "AI subtitles on" appear above the transport and the subtitles instead of on top of them, on the same frosted glass, growing in as they appear.
 
-## 1.1.0 — 2026-09-09
+## 1.1.0 вЂ” 2026-09-09
 
 - Improved screen-sized decode and scaling paths for JPEG, PNG, TIFF, static WebP, PSD and PSB.
 - Added RAW embedded-preview selection by useful dimensions and richer decoder/performance verification.

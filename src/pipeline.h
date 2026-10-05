@@ -46,6 +46,8 @@ std::shared_ptr<Image> OrientPixels(const std::shared_ptr<Image>& src,unsigned o
 // The average colour of an image, as the 1x1 reduction the backdrop wants.
 // Reads at most a few thousand pixels regardless of source size.
 bool AverageColour(const Image& src,uint8_t rgba[4]);
+// A spatial colour wash with bounded work, even for a 100 MP photograph.
+std::shared_ptr<Image> SampleBackdrop(const Image& src,unsigned edge=32);
 
 // Isolated RAW instrumentation. LibRaw exposes parse and entropy unpack as
 // separate calls, but its production dcraw_process() fuses demosaic, colour

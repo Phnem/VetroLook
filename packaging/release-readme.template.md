@@ -50,6 +50,15 @@ it exists purely so this package can be installed on a development machine
 before a real Store signature is available.
 <!-- /msix -->
 
+## First launch and Smart Gallery
+
+Choose English or Russian at the mandatory first-run language question.
+The bundled Smart Gallery model runs locally. First review results stay staged
+until you choose Yes, apply. GOT IT collapses progress into a toast; Later
+preserves labels and asks again next launch. Manual Show/Hide decisions win
+over classification. Read `models/MODEL_CARD.md` for the classifier's measured
+limits; the original scientific quality gate remains failed.
+
 ## AI subtitles
 
 None of the packages contains the speech runtime or model. Open the **…**
@@ -66,6 +75,6 @@ actually produced by the last packaging run.
 ## Portable build (optional)
 
 `VetroLook-{{VERSION}}-Portable.zip` contains `VetroLook.exe`, the playback
-engine `libmpv-2.dll`, the Lensfun database and the license/notices — no
+engine `libmpv-2.dll`, the Lensfun database, the local Smart Gallery model/policy and the license/notices — no
 installation and no uninstaller. The viewer keeps its settings and caches under
 `%LOCALAPPDATA%\VetroLook`.

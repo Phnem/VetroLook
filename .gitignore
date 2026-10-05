@@ -52,3 +52,11 @@ backups/
 .vs/
 .vscode/
 .claude/
+# Generated gallery payload component manifest
+packaging/wix/VetroLook.models.wxi
+# Local context graph
+graft/
+
+# Development-only previous icon variants
+icons/_previous-blue/
+icons/icon*.ico

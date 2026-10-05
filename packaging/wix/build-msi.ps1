@@ -99,7 +99,8 @@ $readmePath = Join-Path $distDir 'README.txt'
 $noticesPath = Join-Path $distDir 'THIRD_PARTY_NOTICES.txt'
 # The playback engine, loaded by name from beside the executable.
 $mpvPath = Join-Path $distDir 'libmpv-2.dll'
-foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath)) {
+$modelsPath = Join-Path $distDir 'models'
+foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath, $modelsPath)) {
     if (-not (Test-Path $required)) { throw "[MSI] Required runtime payload is missing: $required" }
 }
 
@@ -107,7 +108,8 @@ foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath)) {
 # lists the viewer routes by (VetroView\src\media.cpp), so the installer can
 # never offer a format the viewer does not open or miss one it does.
 if (-not $RepoRoot) { $RepoRoot = Split-Path (Split-Path $ScriptDir -Parent) -Parent }
-$mediaSource = Join-Path $RepoRoot 'VetroView\src\media.cpp'
+$sourceDir = if (Test-Path (Join-Path $RepoRoot 'VetroView/CMakeLists.txt')) { Join-Path $RepoRoot 'VetroView' } else { $RepoRoot }
+$mediaSource = Join-Path $sourceDir 'src/media.cpp'
 if (-not (Test-Path $mediaSource)) { throw "[MSI] Extension lists not found: $mediaSource" }
 $mediaText = [System.IO.File]::ReadAllText($mediaSource)
 function Get-ExtensionList([string]$name) {
@@ -154,6 +156,15 @@ $xml.Add('  </DirectoryRef>')
 $xml.Add('</Fragment>')
 $xml.Add('</Include>')
 [System.IO.File]::WriteAllLines($lensFragment, $xml, (New-Object System.Text.UTF8Encoding($false)))
+$modelsFragment = Join-Path $ScriptDir 'VetroLook.models.wxi'
+$modelXml = New-Object System.Collections.Generic.List[string]
+$modelXml.Add('<Include><Fragment xmlns="http://wixtoolset.org/schemas/v4/wxs"><DirectoryRef Id="GalleryModelsFolder"><Component Id="GalleryModels" Guid="B4D62574-F59B-43EC-80D4-7173DD254ADB">')
+Get-ChildItem -LiteralPath $modelsPath -File | Sort-Object Name | ForEach-Object {
+    $source = [System.Security.SecurityElement]::Escape($_.FullName)
+    $modelXml.Add(('<File Source="{0}" />' -f $source))
+}
+$modelXml.Add('</Component></DirectoryRef></Fragment></Include>')
+[System.IO.File]::WriteAllLines($modelsFragment, $modelXml, (New-Object System.Text.UTF8Encoding($false)))
 $outMsi = Join-Path $OutDir "VetroLook-$Version-x64.msi"
 if (Test-Path $outMsi) { Remove-Item $outMsi -Force }
 

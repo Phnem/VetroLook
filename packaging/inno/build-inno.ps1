@@ -41,12 +41,15 @@ $noticesPath = Join-Path (Split-Path $ExePath -Parent) 'THIRD_PARTY_NOTICES.txt'
 # The playback engine. Without it the viewer is an image viewer only: every film
 # reports that the playback library is missing.
 $mpvPath = Join-Path (Split-Path $ExePath -Parent) 'libmpv-2.dll'
-foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath)) {
+$modelsPath = Join-Path (Split-Path $ExePath -Parent) 'models'
+$sourceDir = if (Test-Path (Join-Path $RepoRoot 'VetroView/CMakeLists.txt')) { Join-Path $RepoRoot 'VetroView' } else { $RepoRoot }
+$licensePath = Join-Path $sourceDir 'LICENSE'
+foreach ($required in @($lensDbPath, $readmePath, $noticesPath, $mpvPath, $modelsPath, $licensePath)) {
     if (-not (Test-Path $required)) { throw "[Inno] Required runtime payload is missing: $required" }
 }
 
 Write-Host "[Inno] ISCC.exe: $iscc"
-& $iscc "/DMyAppVersion=$Version" "/DMyExePath=$ExePath" "/DMyLensDbPath=$lensDbPath" "/DMyReadmePath=$readmePath" "/DMyNoticesPath=$noticesPath" "/DMyMpvPath=$mpvPath" $iss
+& $iscc "/DMyAppVersion=$Version" "/DMyExePath=$ExePath" "/DMyLensDbPath=$lensDbPath" "/DMyReadmePath=$readmePath" "/DMyNoticesPath=$noticesPath" "/DMyMpvPath=$mpvPath" "/DMyModelsPath=$modelsPath" "/DMyLicensePath=$licensePath" "/DMyOutDir=$OutDir" $iss
 if ($LASTEXITCODE) { throw 'ISCC.exe failed' }
 
 Write-Host "[Inno] Built $(Join-Path $OutDir "VetroLook-$Version-Setup.exe")"

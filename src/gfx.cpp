@@ -3,6 +3,7 @@
 // redirection surface, so every pixel we present carries its own alpha and the
 // rounded shape of the window is drawn rather than clipped by a region.
 #include "ui.h"
+#include <tuple>
 #include "videomode.h"
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -65,6 +66,7 @@ GlassPanel glassPending[MaxGlassPanels];
 int glassPendingCount=0;
 }
 
+static std::map<std::tuple<float,float,float>,ComPtr<ID2D1RoundedRectangleGeometry>> roundedImageMasks;
 static ComPtr<IDWriteFactory> writer;
 static ComPtr<IDWriteTextFormat> faces[F_COUNT];
 static std::map<const wchar_t*,ComPtr<ID2D1PathGeometry>> icons;
@@ -283,9 +285,11 @@ static void MakeFonts(){
   // Subtitles are read at a glance from across a room, so they are the largest
   // type in the application and the only face that wraps.
   {F_Subtitle,23.f,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_CENTER},
+  {F_Display,48.f,DWRITE_FONT_WEIGHT_BLACK,DWRITE_TEXT_ALIGNMENT_LEADING},
+  {F_Heading,30.f,DWRITE_FONT_WEIGHT_BOLD,DWRITE_TEXT_ALIGNMENT_LEADING},
  };
  for(auto& s:specs){
-  writer->CreateTextFormat(s.face==F_Mono?L"Consolas":L"Segoe UI Variable",nullptr,s.weight,
+  writer->CreateTextFormat(s.face==F_Mono?L"Consolas":(s.face==F_Display||s.face==F_Heading)?L"Arial":L"Segoe UI Variable",nullptr,s.weight,
    DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,s.size,L"en-us",&faces[s.face]);
   if(!faces[s.face])writer->CreateTextFormat(L"Segoe UI",nullptr,s.weight,DWRITE_FONT_STYLE_NORMAL,
    DWRITE_FONT_STRETCH_NORMAL,s.size,L"en-us",&faces[s.face]);
@@ -348,6 +352,7 @@ bool GfxCreate(HWND window,float dpi){
  if(FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,__uuidof(ID2D1Factory1),&options,(void**)factory.GetAddressOf())))return false;
  if(FAILED(factory->CreateDevice(dxgi.Get(),&device)))return false;
  if(FAILED(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,&dc)))return false;
+ dc->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
  dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
  dc->CreateSolidColorBrush(D2D1::ColorF(1.f,1.f,1.f),&ink);
  ComPtr<IDXGIAdapter> adapter;if(FAILED(dxgi->GetAdapter(&adapter)))return false;
@@ -408,7 +413,7 @@ void GfxResize(UINT w,UINT h,float dpi){
  }
 }
 void GfxDestroy(){
- ReleaseTargets();ink.Reset();icons.clear();
+ ReleaseTargets();ink.Reset();icons.clear();roundedImageMasks.clear();
  if(videoVisual)videoVisual->SetContent(nullptr);
  for(int i=0;i<MaxGlassPanels;i++){
   if(glassPanels[i]){glassPanels[i]->SetEffect(nullptr);glassPanels[i]->SetContent(nullptr);}
@@ -485,6 +490,20 @@ void SoftShadow(const D2D1_ROUNDED_RECT& rr,float opacity,float spread){
   ink->SetColor(D2D1::ColorF(0,0,0,alpha[i]*opacity));dc->FillRoundedRectangle(s,ink.Get());
  }
 }
+void DrawRoundedBitmap(ID2D1Bitmap* bitmap,const D2D1_RECT_F& destination,float radius,const D2D1_RECT_F& source){
+ if(!bitmap||!dc||!factory)return;
+ float w=destination.right-destination.left,h=destination.bottom-destination.top;
+ if(w<=0||h<=0)return;
+ radius=(std::min)(radius,(std::min)(w,h)*.5f);
+ if(roundedImageMasks.size()>128)roundedImageMasks.clear();
+ auto key=std::make_tuple(w,h,radius);
+ auto& mask=roundedImageMasks[key];
+ if(!mask)factory->CreateRoundedRectangleGeometry(D2D1::RoundedRect(D2D1::RectF(0,0,w,h),radius,radius),&mask);
+ if(mask)dc->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),mask.Get(),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+   D2D1::Matrix3x2F::Translation(destination.left,destination.top)),nullptr);
+ dc->DrawBitmap(bitmap,destination,1.f,D2D1_INTERPOLATION_MODE_LINEAR,&source);
+ if(mask)dc->PopLayer();
+}
 void Glass(const D2D1_ROUNDED_RECT& rr,const Palette& p,float opacity,const D2D1_MATRIX_3X2_F& world){
  if(!GfxReady()||opacity<=.004f)return;
  // The live video sits in a separate DirectComposition visual, so ordinary
@@ -499,6 +518,9 @@ void Glass(const D2D1_ROUNDED_RECT& rr,const Palette& p,float opacity,const D2D1
  if(frostValid){auto b=GlassSource(world);if(b){b->SetOpacity(opacity);dc->FillRoundedRectangle(rr,b);}}
  ink->SetColor(Fade(p.glass,opacity));dc->FillRoundedRectangle(rr,ink.Get());
  ink->SetColor(Fade(p.glassEdge,opacity));dc->DrawRoundedRectangle(rr,ink.Get(),1.f);
+ auto inner=rr;inner.rect=D2D1::RectF(rr.rect.left+1.5f,rr.rect.top+1.5f,rr.rect.right-1.5f,rr.rect.bottom-1.5f);
+ inner.radiusX=(std::max)(0.f,rr.radiusX-1.5f);inner.radiusY=(std::max)(0.f,rr.radiusY-1.5f);
+ ink->SetColor(Fade(p.glassLift,opacity));dc->DrawRoundedRectangle(inner,ink.Get(),.8f);
 }
 
 void Write(const std::wstring& s,D2D1_RECT_F r,Face f,D2D1_COLOR_F colour){
