@@ -63,7 +63,7 @@ The interface floats directly above the image using a soft, matte glass visual l
 
 <div align="center">
 
-<img src="docs/assets/viewer.png" width="900" alt="VetroLook Viewer">
+<img src="docs/assets/viewer.webp" width="900" alt="VetroLook Viewer">
 
 </div>
 
@@ -96,6 +96,28 @@ Every interaction is designed around subtle physical motion:
 The goal is not simply to make VetroLook *look* modern.
 
 It should **feel physical**.
+
+---
+
+## Screenshots
+
+All screenshots use free stock photography.
+
+<div align="center">
+
+<img src="docs/assets/screenshots/03-edit.webp" width="440" alt="Editing tools"> <img src="docs/assets/screenshots/09-menu.webp" width="440" alt="Menu with theme, language and default viewer"><br>
+<sub>Editing tools · Menu</sub>
+
+<img src="docs/assets/screenshots/11-viewer-light.webp" width="440" alt="Light theme viewer"> <img src="docs/assets/screenshots/12-gallery-light.webp" width="440" alt="Light theme gallery"><br>
+<sub>Light theme: viewer · gallery</sub>
+
+<img src="docs/assets/screenshots/05-sidebar.webp" width="440" alt="Files sidebar"> <img src="docs/assets/screenshots/06-filters.webp" width="440" alt="Filters with Smart Gallery classes"><br>
+<sub>Files sidebar · Filters</sub>
+
+<img src="docs/assets/screenshots/07-sort.webp" width="440" alt="Sort menu"> <img src="docs/assets/screenshots/08-search.webp" width="440" alt="Folder search"><br>
+<sub>Sorting · Search</sub>
+
+</div>
 
 ---
 
@@ -179,7 +201,7 @@ Folders containing supported images automatically appear in the library. Folder 
 
 <div align="center">
 
-<img src="docs/assets/library.png" width="900" alt="VetroLook Library">
+<img src="docs/assets/library.webp" width="900" alt="VetroLook Library">
 
 </div>
 
@@ -227,7 +249,7 @@ The floating Info panel provides technical information without covering the imag
 
 <div align="center">
 
-<img src="docs/assets/info.png" width="500" alt="VetroLook Info panel">
+<img src="docs/assets/info.webp" width="900" alt="VetroLook Info panel with histogram">
 
 </div>
 
