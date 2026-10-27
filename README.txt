@@ -1,4 +1,4 @@
-VETRO LOOK 2.4.0 — TOKYO GLASS
+VETRO LOOK 2.4.1 — TOKYO GLASS
 
 Launch VetroLook.exe, then drop an image onto the window or press Ctrl+O.
 You can also pass an image path on the command line or use Windows Open with.

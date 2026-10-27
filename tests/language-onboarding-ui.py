@@ -53,8 +53,18 @@ def main():
             command = [exe, "--language-onboarding-test", key, str(report)]
             process = subprocess.Popen(command)
             window = wait_window(process)
+            appeared = time.monotonic()
             native = HwndWrapper(window.handle)
             native.set_focus()
+            # A click or key that arrives while the window is still settling is
+            # the tail of whatever launched it, not an answer.
+            rect = window.rectangle()
+            window.click_input(coords=(int(rect.width() * .72), int(rect.height() * .805)))
+            keyboard.send_keys("{TAB}{ENTER}")
+            time.sleep(.2)
+            assert process.poll() is None, "Input during the settle period dismissed the question"
+            assert read_language(key) == ((7, winreg.REG_DWORD) if invalid else None)
+            checks.append(case + ": input while settling ignored")
             time.sleep(.3)
             assert native.window_text() == "VetroLook — Choose your language", ascii(native.window_text())
             window.capture_as_image().save(output / f"{case}.png")
@@ -65,6 +75,7 @@ def main():
             assert process.poll() is None, "Close or Escape dismissed the question"
             assert read_language(key) == ((7, winreg.REG_DWORD) if invalid else None)
             checks.append(case + ": close, Alt+F4 and Escape blocked without saving")
+            time.sleep(max(0, appeared + 1.8 - time.monotonic()))
             native.set_focus()
             if choice == 1:
                 keyboard.send_keys("{TAB}{ENTER}")

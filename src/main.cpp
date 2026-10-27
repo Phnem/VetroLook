@@ -85,6 +85,9 @@ enum Id{
  IdSyncRow,IdPowerRow,IdSeekStep,IdDiagnostics,IdAiModel,IdAiLanguage,IdSilenceSkip,IdEnhancement,
  IdReviewUnderstood,IdReviewApply,IdReviewLater,IdReviewToast,
  IdSmartToggle,IdSmartUncertain,IdSmartClass0,IdSmartClass1,IdSmartClass2,IdSmartClass3,IdSmartClass4,IdSmartClass5,
+ // The library side menu's settings footer. Kept out of the IdSend..IdSwatch5
+ // run on purpose: those are the viewer panel's controls and share its hit rules.
+ IdLibSettings,IdLibThemeRow,IdLibLangRow,IdLibSpeechRow,
  IdNavFolder0=1<<17,
  IdGallery0=4096,
  IdFilterExt0=1<<19,       // +one per supported extension
@@ -129,6 +132,10 @@ int wheelMode=0;float wheelCarry=0;
 int tcStatus=TcMissing;   // refreshed whenever the menu opens
 Spring zoomLog(0,ZoomK,ZoomC),panSX(0,ZoomK,ZoomC),panSY(0,ZoomK,ZoomC),rotate(0,PanelK,PanelC);
 Spring panelSlide(0,PanelK,PanelC),levelSlide(0,PanelK,PanelC),titleIn(1,PanelK,PanelC);
+// The library side menu's settings footer: collapsed until asked for, and the
+// language selector's knob, which slides like the theme's does.
+Spring settingsSlide(0,PanelK,PanelC),langMix(0,PanelK,PanelC);
+bool settingsOpen=false;
 Spring toastIn(0,PanelK,PanelC),likePop(1,ButtonK,ButtonC),thumbLift(0,ButtonK,ButtonC);
 Spring clipHighFade(0,PanelK,PanelC),clipLowFade(0,PanelK,PanelC),histRise(0,GalleryK,GalleryC);
 int panel=PanelNone,pendingPanel=PanelNone,menuLevel=0,tool=ToolNone;
@@ -1081,7 +1088,7 @@ void SaveLibView(){
  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"LibraryView",REG_DWORD,&stored,sizeof(stored));
 }
 void SetLanguage(int value){
- language=value;
+ language=value;langMix.To(float(value));
  DWORD stored=DWORD(value);
  RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\VetroLook\\Settings",L"Language",REG_DWORD,&stored,sizeof(stored));
  Wake();
@@ -4715,6 +4722,7 @@ bool Tick(float dt){
  }else{busy|=panSX.Step(dt);busy|=panSY.Step(dt);}
  busy|=rotate.Step(dt);
  busy|=panelSlide.Step(dt);busy|=levelSlide.Step(dt);busy|=titleIn.Step(dt);
+ busy|=settingsSlide.Step(dt);busy|=langMix.Step(dt);
  busy|=toastIn.Step(dt);busy|=likePop.Step(dt);busy|=thumbLift.Step(dt);
  busy|=clipHighFade.Step(dt);busy|=clipLowFade.Step(dt);busy|=histRise.Step(dt);
  busy|=filterReveal.Step(dt);busy|=sortReveal.Step(dt);busy|=libViewSlide.Step(dt);busy|=libContentIn.Step(dt);
@@ -5257,6 +5265,10 @@ void LibraryCommand(int id){
   }
   Wake();return;
  case IdLibRescan:IndexRescan();Wake();return;
+ case IdLibSettings:settingsOpen=!settingsOpen;settingsSlide.To(settingsOpen?1.f:0.f);Wake();return;
+ // The footer's controls are the viewer menu's own, so they do what those do.
+ case IdThemeDark:case IdThemeLight:case IdLangRu:case IdLangEn:Command(id);return;
+ case IdLibSpeechRow:Command(IdAiModel);return;
  case IdSortName:if(libSortField==0)libSortDesc=!libSortDesc;else{libSortField=0;libSortDesc=false;}RefreshLibrary();Wake();return;
  case IdSortDate:if(libSortField==1)libSortDesc=!libSortDesc;else{libSortField=1;libSortDesc=true;}RefreshLibrary();Wake();return;
  case IdSortSize:if(libSortField==2)libSortDesc=!libSortDesc;else{libSortField=2;libSortDesc=true;}RefreshLibrary();Wake();return;
@@ -6858,6 +6870,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
  if(!testing&&!languageChosen&&!LanguageOnboarding::Ask(instance,light)){
   LocalFree(argv);if(ole)OleUninitialize();RoUninitialize();return 5;
  }
+ langMix.Reset(float(language)); // after the first-run question may have changed it
  WNDCLASSW wc{};
  wc.lpfnWndProc=Proc;wc.hInstance=instance;wc.lpszClassName=L"VetroLook.Window";
 #ifdef VETRO_REVIEW_BUILD

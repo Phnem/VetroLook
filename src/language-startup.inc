@@ -6,7 +6,17 @@ struct State {
  std::wstring key,error;
  int selected=-1,focus=-1,hover=-1,pressed=-1;
  bool dirty=true;
+ // The window opens under the cursor the installer or shortcut was just clicked
+ // with, and an impatient second click lands on it before it can be read. Input
+ // only counts once the window has settled and, for the pointer, once the
+ // mouse has actually travelled or has clearly been left alone on purpose.
+ ULONGLONG shownAt=GetTickCount64();POINT rest{};bool moved=false;
 };
+constexpr ULONGLONG SettleMs=1200,RestMs=4000;
+bool Armed(const State& state,bool pointer){
+ ULONGLONG age=GetTickCount64()-state.shownAt;
+ return age>=SettleMs&&(!pointer||state.moved||age>=RestMs);
+}
 bool Load(const std::wstring& key,int& value){
  DWORD stored=0,size=sizeof(stored);
  if(RegGetValueW(HKEY_CURRENT_USER,key.c_str(),L"Language",RRF_RT_REG_DWORD,nullptr,&stored,&size)!=ERROR_SUCCESS||stored>1)return false;
@@ -39,12 +49,16 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  case WM_PAINT:{PAINTSTRUCT paint;BeginPaint(hwnd,&paint);EndPaint(hwnd,&paint);state->dirty=true;return 0;}
  case WM_SIZE:{RECT client{};GetClientRect(hwnd,&client);GfxResize(client.right,client.bottom,dpi);state->dirty=true;return 0;}
  case WM_DPICHANGED:{dpi=HIWORD(wp)/96.f;auto* r=reinterpret_cast<RECT*>(lp);SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);state->dirty=true;return 0;}
- case WM_MOUSEMOVE:{int hit=At(hwnd,lp);if(hit!=state->hover){state->hover=hit;state->dirty=true;}TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};TrackMouseEvent(&track);return 0;}
+ case WM_MOUSEMOVE:{
+  POINT cursor{};if(GetCursorPos(&cursor)&&(cursor.x!=state->rest.x||cursor.y!=state->rest.y))state->moved=true;
+  int hit=At(hwnd,lp);if(hit!=state->hover){state->hover=hit;state->dirty=true;}TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,hwnd,0};TrackMouseEvent(&track);return 0;
+ }
  case WM_MOUSELEAVE:state->hover=-1;state->dirty=true;return 0;
- case WM_LBUTTONDOWN:state->pressed=At(hwnd,lp);if(state->pressed>=0){state->focus=state->pressed;SetCapture(hwnd);state->dirty=true;}return 0;
+ case WM_LBUTTONDOWN:if(!Armed(*state,true))return 0;state->pressed=At(hwnd,lp);if(state->pressed>=0){state->focus=state->pressed;SetCapture(hwnd);state->dirty=true;}return 0;
  case WM_LBUTTONUP:{int hit=At(hwnd,lp),pressed=state->pressed;state->pressed=-1;ReleaseCapture();if(hit>=0&&hit==pressed)Choose(hwnd,*state,hit);state->dirty=true;return 0;}
  case WM_CAPTURECHANGED:state->pressed=-1;state->dirty=true;return 0;
  case WM_KEYDOWN:
+  if(!Armed(*state,false))return 0;
   if(wp==VK_TAB){state->focus=state->focus<0?1:1-state->focus;state->dirty=true;}
   else if(wp==VK_LEFT||wp==VK_RIGHT){state->focus=wp==VK_LEFT?1:0;state->dirty=true;}
   else if((wp==VK_RETURN||wp==VK_SPACE)&&state->focus>=0)Choose(hwnd,*state,state->focus);
@@ -80,7 +94,7 @@ void Paint(HWND hwnd,const State& state){
  GfxPresent(true);
 }
 bool Ask(HINSTANCE instance,bool light,const std::wstring& key=SettingsKey){
- State state;state.key=key;
+ State state;state.key=key;GetCursorPos(&state.rest);
  HWND previousWindow=win;float previousDpi=dpi;themeMix.Reset(light?1.f:0.f);
  WNDCLASSW cls{};cls.lpfnWndProc=Proc;cls.hInstance=instance;cls.lpszClassName=L"VetroLook.LanguageOnboarding";
  cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.hIcon=ThemedAppIcon();RegisterClassW(&cls);
@@ -94,6 +108,7 @@ bool Ask(HINSTANCE instance,bool light,const std::wstring& key=SettingsKey){
  bool ready=GfxCreate(win,dpi);
  if(ready){
   Paint(win,state);ShowWindow(win,SW_SHOW);SetForegroundWindow(win);
+  state.shownAt=GetTickCount64();GetCursorPos(&state.rest);
   MSG event{};bool running=true;
   while(running&&state.selected<0){
    while(PeekMessageW(&event,nullptr,0,0,PM_REMOVE)){

@@ -40,6 +40,11 @@ VetroLook aims to combine:
 
 without requiring you to import your collection into a proprietary database or upload anything to the cloud.
 
+## 2.4.1
+
+- **Language question:** it no longer closes on a stray click or key that arrives as the window opens.
+- **Settings in the side menu:** theme, language and the speech-recognition model download now sit at the bottom of the library menu.
+
 ## 2.4.0 highlights
 
 - **English / Русский:** a mandatory first-run question asks you to choose a language in English. It cannot be dismissed until you choose; the preference is saved and can be changed later in the menu.
@@ -49,7 +54,7 @@ without requiring you to import your collection into a proprietary database or u
 - **Local Smart Gallery:** a bundled six-class model labels the gallery in the background. A progress popup can collapse into a bottom-right toast; results are applied only after your confirmation.
 - **Safe corrections:** Later keeps labels for the next launch, Show all reveals filtered items, and manual Show/Hide choices persist. Files on disk are never deleted by smart filtering.
 
-[Download 2.4.0](https://github.com/Phnem/VetroLook/releases/tag/v2.4.0) · [Changelog](CHANGELOG.md)
+[Download 2.4.1](https://github.com/Phnem/VetroLook/releases/tag/v2.4.1) · [Changelog](CHANGELOG.md)
 
 The bundled classifier has a known validation limitation: its 95% upper bound for hiding a real photo is 0.15061%, above the original 0.1% target. It is included with publisher acceptance; uncertain images remain visible. See the [model card](models/MODEL_CARD.md).
 

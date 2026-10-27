@@ -1,6 +1,11 @@
 # Changelog
 
-## 2.4.0 вЂ” 2026-10-05
+## 2.4.1 — 2026-10-27
+
+- Fixed the first-run language question closing before it could be answered. A click or key that arrives while the window is still settling (the tail of an installer's Finish click, an impatient second click on a shortcut) is now ignored. Mouse input also needs real pointer movement, or a few seconds of the window being left alone, before it counts.
+- Added a Settings section at the foot of the library side menu with the theme, the language and the speech-recognition model download (download, cancel, remove).
+
+## 2.4.0 — 2026-10-05
 
 Changes since the last published release, 2.2:
 
